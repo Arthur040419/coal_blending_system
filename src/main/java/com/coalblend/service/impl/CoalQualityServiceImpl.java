@@ -6,9 +6,11 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.coalblend.common.exception.BusinessException;
 import com.coalblend.entity.CoalQuality;
 import com.coalblend.mapper.CoalQualityMapper;
+import com.coalblend.mapper.CoalTypeMapper;
 import com.coalblend.service.CoalQualityService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 
@@ -17,9 +19,10 @@ import java.util.List;
 public class CoalQualityServiceImpl implements CoalQualityService {
 
     private final CoalQualityMapper coalQualityMapper;
+    private final CoalTypeMapper coalTypeMapper;
 
     @Override
-    public IPage<CoalQuality> page(long current, long size, Long coalId, Integer status) {
+    public IPage<CoalQuality> page(long current, long size, Long coalId, Integer status, String keyword) {
         Page<CoalQuality> page = new Page<>(current, size);
         LambdaQueryWrapper<CoalQuality> w = new LambdaQueryWrapper<>();
         if (coalId != null) {
@@ -27,6 +30,9 @@ public class CoalQualityServiceImpl implements CoalQualityService {
         }
         if (status != null) {
             w.eq(CoalQuality::getStatus, status);
+        }
+        if (StringUtils.hasText(keyword)) {
+            w.like(CoalQuality::getBatchNo, keyword);
         }
         w.orderByDesc(CoalQuality::getSampleTime);
         return coalQualityMapper.selectPage(page, w);
@@ -63,6 +69,15 @@ public class CoalQualityServiceImpl implements CoalQualityService {
 
     @Override
     public void add(CoalQuality entity) {
+        if (entity.getCoalId() == null) {
+            throw new BusinessException("煤种不能为空");
+        }
+        if (coalTypeMapper.selectById(entity.getCoalId()) == null) {
+            throw new BusinessException(404, "煤种不存在");
+        }
+        if (!StringUtils.hasText(entity.getBatchNo())) {
+            throw new BusinessException("批次号不能为空");
+        }
         if (entity.getStatus() == null) {
             entity.setStatus(1);
         }

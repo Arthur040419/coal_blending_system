@@ -7,7 +7,9 @@ import com.coalblend.entity.SysUser;
 import com.coalblend.service.UserService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,6 +34,11 @@ public class UserController {
         return Result.ok(userService.page(current, size, keyword, role, status));
     }
 
+    @GetMapping("/detail/{id}")
+    public Result<SysUser> detail(@PathVariable Long id) {
+        return Result.ok(userService.getById(id));
+    }
+
     @PostMapping("/add")
     public Result<SysUser> add(@RequestBody SysUser body) {
         userService.add(body);
@@ -47,6 +54,12 @@ public class UserController {
     @PutMapping("/status")
     public Result<Void> status(@RequestBody @Valid UserStatusDTO dto) {
         userService.updateStatus(dto.getId(), dto.getStatus());
+        return Result.ok();
+    }
+
+    @DeleteMapping("/delete/{id}")
+    public Result<Void> delete(@PathVariable Long id) {
+        userService.delete(id);
         return Result.ok();
     }
 }

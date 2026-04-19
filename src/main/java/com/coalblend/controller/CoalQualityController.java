@@ -29,8 +29,9 @@ public class CoalQualityController {
             @RequestParam(defaultValue = "1") long current,
             @RequestParam(defaultValue = "10") long size,
             @RequestParam(required = false) Long coalId,
-            @RequestParam(required = false) Integer status) {
-        return Result.ok(coalQualityService.page(current, size, coalId, status));
+            @RequestParam(required = false) Integer status,
+            @RequestParam(required = false) String keyword) {
+        return Result.ok(coalQualityService.page(current, size, coalId, status, keyword));
     }
 
     @GetMapping("/listByCoal/{coalId}")

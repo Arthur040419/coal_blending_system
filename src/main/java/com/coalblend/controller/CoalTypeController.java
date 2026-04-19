@@ -26,8 +26,10 @@ public class CoalTypeController {
     public Result<IPage<CoalType>> page(
             @RequestParam(defaultValue = "1") long current,
             @RequestParam(defaultValue = "10") long size,
-            @RequestParam(required = false) String keyword) {
-        return Result.ok(coalTypeService.page(current, size, keyword));
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String coalCategory,
+            @RequestParam(required = false) Integer blendableFlag) {
+        return Result.ok(coalTypeService.page(current, size, keyword, coalCategory, blendableFlag));
     }
 
     @GetMapping("/detail/{id}")

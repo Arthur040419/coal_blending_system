@@ -36,6 +36,12 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public void add(SysUser entity) {
+        if (!StringUtils.hasText(entity.getUsername())) {
+            throw new BusinessException("用户名不能为空");
+        }
+        if (!StringUtils.hasText(entity.getPassword())) {
+            throw new BusinessException("密码不能为空");
+        }
         Long cnt = sysUserMapper.selectCount(
                 new LambdaQueryWrapper<SysUser>().eq(SysUser::getUsername, entity.getUsername()));
         if (cnt != null && cnt > 0) {
@@ -98,5 +104,20 @@ public class UserServiceImpl implements UserService {
         u.setId(id);
         u.setStatus(status);
         sysUserMapper.updateById(u);
+    }
+
+    @Override
+    public SysUser getById(Long id) {
+        SysUser row = sysUserMapper.selectById(id);
+        if (row == null) {
+            throw new BusinessException(404, "用户不存在");
+        }
+        return row;
+    }
+
+    @Override
+    public void delete(Long id) {
+        getById(id);
+        sysUserMapper.deleteById(id);
     }
 }

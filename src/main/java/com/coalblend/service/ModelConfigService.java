@@ -9,7 +9,7 @@ public interface ModelConfigService {
 
     List<ModelConfig> listAll();
 
-    IPage<ModelConfig> page(long current, long size);
+    IPage<ModelConfig> page(long current, long size, String keyword, String modelType);
 
     ModelConfig getById(Long id);
 
@@ -18,4 +18,6 @@ public interface ModelConfigService {
     void update(ModelConfig entity);
 
     void updateStatus(Long id, Integer status);
+
+    void delete(Long id);
 }

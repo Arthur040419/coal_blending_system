@@ -64,6 +64,12 @@ public class RuleKnowledgeServiceImpl implements RuleKnowledgeService {
 
     @Override
     public void add(RuleKnowledge entity) {
+        if (!StringUtils.hasText(entity.getRuleCode())) {
+            throw new BusinessException("规则编号不能为空");
+        }
+        if (!StringUtils.hasText(entity.getRuleName())) {
+            throw new BusinessException("规则名称不能为空");
+        }
         Long cnt = ruleKnowledgeMapper.selectCount(
                 new LambdaQueryWrapper<RuleKnowledge>().eq(RuleKnowledge::getRuleCode, entity.getRuleCode()));
         if (cnt != null && cnt > 0) {

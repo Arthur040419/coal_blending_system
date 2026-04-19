@@ -63,6 +63,12 @@ public class CaseSampleServiceImpl implements CaseSampleService {
 
     @Override
     public void add(CaseSample entity) {
+        if (!StringUtils.hasText(entity.getCaseCode())) {
+            throw new BusinessException("案例编号不能为空");
+        }
+        if (!StringUtils.hasText(entity.getCaseName())) {
+            throw new BusinessException("案例名称不能为空");
+        }
         Long cnt = caseSampleMapper.selectCount(
                 new LambdaQueryWrapper<CaseSample>().eq(CaseSample::getCaseCode, entity.getCaseCode()));
         if (cnt != null && cnt > 0) {

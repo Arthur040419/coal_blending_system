@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.coalblend.common.exception.BusinessException;
 import com.coalblend.entity.Inventory;
+import com.coalblend.mapper.CoalTypeMapper;
 import com.coalblend.mapper.InventoryMapper;
 import com.coalblend.service.InventoryService;
 import com.coalblend.vo.InventoryAvailableVO;
@@ -21,6 +22,7 @@ import java.util.stream.Collectors;
 public class InventoryServiceImpl implements InventoryService {
 
     private final InventoryMapper inventoryMapper;
+    private final CoalTypeMapper coalTypeMapper;
 
     @Override
     public IPage<Inventory> page(long current, long size, Long coalId, Integer status, String warehouseCode) {
@@ -33,7 +35,7 @@ public class InventoryServiceImpl implements InventoryService {
             w.eq(Inventory::getStatus, status);
         }
         if (StringUtils.hasText(warehouseCode)) {
-            w.eq(Inventory::getWarehouseCode, warehouseCode);
+            w.like(Inventory::getWarehouseCode, warehouseCode);
         }
         w.orderByDesc(Inventory::getId);
         return inventoryMapper.selectPage(page, w);
@@ -72,6 +74,12 @@ public class InventoryServiceImpl implements InventoryService {
 
     @Override
     public void add(Inventory entity) {
+        if (entity.getCoalId() == null) {
+            throw new BusinessException("煤种不能为空");
+        }
+        if (coalTypeMapper.selectById(entity.getCoalId()) == null) {
+            throw new BusinessException(404, "煤种不存在");
+        }
         if (entity.getStatus() == null) {
             entity.setStatus(1);
         }

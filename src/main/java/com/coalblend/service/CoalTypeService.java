@@ -5,7 +5,7 @@ import com.coalblend.entity.CoalType;
 
 public interface CoalTypeService {
 
-    IPage<CoalType> page(long current, long size, String keyword);
+    IPage<CoalType> page(long current, long size, String keyword, String coalCategory, Integer blendableFlag);
 
     CoalType getById(Long id);
 

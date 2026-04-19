@@ -12,4 +12,8 @@ public interface UserService {
     void update(SysUser entity);
 
     void updateStatus(Long id, Integer status);
+
+    SysUser getById(Long id);
+
+    void delete(Long id);
 }

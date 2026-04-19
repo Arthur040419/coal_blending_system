@@ -7,7 +7,7 @@ import java.util.List;
 
 public interface CoalQualityService {
 
-    IPage<CoalQuality> page(long current, long size, Long coalId, Integer status);
+    IPage<CoalQuality> page(long current, long size, Long coalId, Integer status, String keyword);
 
     List<CoalQuality> listByCoal(Long coalId);
 

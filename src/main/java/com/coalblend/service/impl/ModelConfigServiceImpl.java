@@ -9,6 +9,7 @@ import com.coalblend.mapper.ModelConfigMapper;
 import com.coalblend.service.ModelConfigService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 
@@ -24,9 +25,16 @@ public class ModelConfigServiceImpl implements ModelConfigService {
     }
 
     @Override
-    public IPage<ModelConfig> page(long current, long size) {
-        return modelConfigMapper.selectPage(new Page<>(current, size),
-                new LambdaQueryWrapper<ModelConfig>().orderByDesc(ModelConfig::getId));
+    public IPage<ModelConfig> page(long current, long size, String keyword, String modelType) {
+        LambdaQueryWrapper<ModelConfig> w = new LambdaQueryWrapper<>();
+        if (StringUtils.hasText(modelType)) {
+            w.eq(ModelConfig::getModelType, modelType);
+        }
+        if (StringUtils.hasText(keyword)) {
+            w.and(q -> q.like(ModelConfig::getModelName, keyword).or().like(ModelConfig::getRemark, keyword));
+        }
+        w.orderByDesc(ModelConfig::getId);
+        return modelConfigMapper.selectPage(new Page<>(current, size), w);
     }
 
     @Override
@@ -40,6 +48,9 @@ public class ModelConfigServiceImpl implements ModelConfigService {
 
     @Override
     public void add(ModelConfig entity) {
+        if (!StringUtils.hasText(entity.getModelName())) {
+            throw new BusinessException("模型名称不能为空");
+        }
         if (entity.getStatus() == null) {
             entity.setStatus(1);
         }
@@ -62,5 +73,11 @@ public class ModelConfigServiceImpl implements ModelConfigService {
         u.setId(id);
         u.setStatus(status);
         modelConfigMapper.updateById(u);
+    }
+
+    @Override
+    public void delete(Long id) {
+        getById(id);
+        modelConfigMapper.deleteById(id);
     }
 }
