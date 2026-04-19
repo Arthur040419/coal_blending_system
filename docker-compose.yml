@@ -1,0 +1,20 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: coal-blending-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: coal_blending_system
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - coal-blending-mysql-data:/var/lib/mysql
+      - ./db/coal_blending_system_2026-04-18.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+
+volumes:
+  coal-blending-mysql-data:
