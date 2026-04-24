@@ -22,9 +22,25 @@ public class BlendPlan {
     private BigDecimal costScore;
     private BigDecimal stabilityScore;
     private BigDecimal overallScore;
+    /** 是否满足硬约束：1 是，0 否 */
+    private Integer feasibleFlag;
+    /** 约束校验摘要：预测指标、违反项、风险提示 */
+    private String constraintSummary;
+    /** 评分明细：质量、成本、库存稳定性和综合评分理由 */
+    private String scoreDetail;
+    /** 风险等级：low/medium/high */
+    private String riskLevel;
     private String planStatus;
     private String explanation;
+    /** 知识增强：模型输出的规则/命中依据说明 */
+    private String ruleBasis;
     private String riskTip;
+    /** AI 优化建议 */
+    private String optimizeSuggestion;
+    /** 解释所用模型名称 */
+    private String aiModelName;
+    /** 是否由大模型生成：1 是，0 否 */
+    private Integer aiGenerateFlag;
     private Long createBy;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

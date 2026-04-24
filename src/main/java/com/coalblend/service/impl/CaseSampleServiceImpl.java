@@ -4,7 +4,9 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.coalblend.common.exception.BusinessException;
+import com.coalblend.entity.BlendPlanFeedback;
 import com.coalblend.entity.CaseSample;
+import com.coalblend.mapper.BlendPlanFeedbackMapper;
 import com.coalblend.mapper.CaseSampleMapper;
 import com.coalblend.service.CaseSampleService;
 import lombok.RequiredArgsConstructor;
@@ -18,6 +20,7 @@ import java.util.List;
 public class CaseSampleServiceImpl implements CaseSampleService {
 
     private final CaseSampleMapper caseSampleMapper;
+    private final BlendPlanFeedbackMapper feedbackMapper;
 
     @Override
     public IPage<CaseSample> page(long current, long size, Integer status, String keyword) {
@@ -100,6 +103,15 @@ public class CaseSampleServiceImpl implements CaseSampleService {
     @Override
     public void delete(Long id) {
         getById(id);
+        Long refCnt = feedbackMapper.selectCount(new LambdaQueryWrapper<BlendPlanFeedback>()
+                .eq(BlendPlanFeedback::getCaseId, id));
+        if (refCnt != null && refCnt > 0) {
+            CaseSample patch = new CaseSample();
+            patch.setId(id);
+            patch.setStatus(0);
+            caseSampleMapper.updateById(patch);
+            return;
+        }
         caseSampleMapper.deleteById(id);
     }
 }

@@ -7,7 +7,7 @@
 #
 # 主机: 127.0.0.1 (MySQL 9.3.0)
 # 数据库: coal_blending_system
-# 生成时间: 2026-04-18 10:07:57 +0000
+# 生成时间: 2026-04-24 12:32:18 +0000
 # ************************************************************
 
 
@@ -23,8 +23,6 @@ SET NAMES utf8mb4;
 # 转储表 blend_plan
 # ------------------------------------------------------------
 
-DROP TABLE IF EXISTS `blend_plan`;
-
 CREATE TABLE `blend_plan` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `plan_code` varchar(50) NOT NULL COMMENT '方案编号',
@@ -35,9 +33,17 @@ CREATE TABLE `blend_plan` (
   `cost_score` decimal(8,2) DEFAULT NULL COMMENT '成本评分',
   `stability_score` decimal(8,2) DEFAULT NULL COMMENT '稳定性评分',
   `overall_score` decimal(8,2) DEFAULT NULL COMMENT '综合评分',
+  `feasible_flag` tinyint NOT NULL DEFAULT '1' COMMENT '是否满足硬约束：1是，0否',
+  `constraint_summary` text COMMENT '约束校验摘要：预测指标、违反项、风险提示',
+  `score_detail` text COMMENT '评分明细：质量、成本、库存稳定性和综合评分理由',
+  `risk_level` varchar(20) DEFAULT NULL COMMENT '风险等级：low/medium/high',
   `plan_status` varchar(20) DEFAULT 'generated' COMMENT '方案状态：generated/selected/executed',
   `explanation` text COMMENT '方案解释',
+  `rule_basis` text COMMENT 'AI生成的规则依据（知识增强）',
   `risk_tip` text COMMENT '风险提示',
+  `optimize_suggestion` text COMMENT 'AI优化建议',
+  `ai_model_name` varchar(100) DEFAULT NULL COMMENT '解释所用模型名称',
+  `ai_generate_flag` tinyint NOT NULL DEFAULT '0' COMMENT '是否由大模型生成解释：1是，0否',
   `create_by` bigint DEFAULT NULL COMMENT '创建人',
   `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -51,8 +57,6 @@ CREATE TABLE `blend_plan` (
 
 # 转储表 blend_plan_detail
 # ------------------------------------------------------------
-
-DROP TABLE IF EXISTS `blend_plan_detail`;
 
 CREATE TABLE `blend_plan_detail` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -76,10 +80,43 @@ CREATE TABLE `blend_plan_detail` (
 
 
 
-# 转储表 case_sample
+# 转储表 blend_plan_feedback
 # ------------------------------------------------------------
 
-DROP TABLE IF EXISTS `case_sample`;
+CREATE TABLE `blend_plan_feedback` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `plan_id` bigint NOT NULL COMMENT '关联方案ID',
+  `order_id` bigint NOT NULL COMMENT '关联订单ID',
+  `actual_quantity` decimal(12,2) NOT NULL COMMENT '实际执行量（吨）',
+  `actual_ash` decimal(6,2) DEFAULT NULL COMMENT '实际灰分',
+  `actual_sulfur` decimal(6,2) DEFAULT NULL COMMENT '实际硫分',
+  `actual_moisture` decimal(6,2) DEFAULT NULL COMMENT '实际水分',
+  `actual_volatile` decimal(6,2) DEFAULT NULL COMMENT '实际挥发分',
+  `actual_calorific` decimal(10,2) DEFAULT NULL COMMENT '实际发热量',
+  `actual_cost` decimal(12,2) DEFAULT NULL COMMENT '实际成本',
+  `qualified_flag` tinyint NOT NULL DEFAULT '1' COMMENT '是否达标：1是，0否',
+  `effectiveness_eval` varchar(50) DEFAULT NULL COMMENT '执行评价：优秀/良好/一般/较差',
+  `feedback_desc` text COMMENT '反馈说明',
+  `execute_date` date DEFAULT NULL COMMENT '执行日期',
+  `operator_id` bigint DEFAULT NULL COMMENT '反馈录入人',
+  `case_generated_flag` tinyint NOT NULL DEFAULT '0' COMMENT '是否已沉淀为案例：1是，0否',
+  `case_id` bigint DEFAULT NULL COMMENT '回流生成的案例ID',
+  `status` tinyint NOT NULL DEFAULT '1' COMMENT '状态：1有效，0无效',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_feedback_plan` (`plan_id`),
+  KEY `idx_feedback_order` (`order_id`),
+  KEY `idx_feedback_case` (`case_id`),
+  CONSTRAINT `fk_feedback_case` FOREIGN KEY (`case_id`) REFERENCES `case_sample` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_feedback_order` FOREIGN KEY (`order_id`) REFERENCES `orders` (`id`),
+  CONSTRAINT `fk_feedback_plan` FOREIGN KEY (`plan_id`) REFERENCES `blend_plan` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='配煤方案执行反馈表';
+
+
+
+# 转储表 case_sample
+# ------------------------------------------------------------
 
 CREATE TABLE `case_sample` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -98,23 +135,10 @@ CREATE TABLE `case_sample` (
   UNIQUE KEY `case_code` (`case_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='历史案例表';
 
-LOCK TABLES `case_sample` WRITE;
-/*!40000 ALTER TABLE `case_sample` DISABLE KEYS */;
-
-INSERT INTO `case_sample` (`id`, `case_code`, `case_name`, `order_desc`, `blend_desc`, `result_desc`, `quality_result`, `cost_result`, `effectiveness_eval`, `status`, `create_time`, `update_time`)
-VALUES
-	(1,'C001','低硫动力煤配煤案例','需求5000吨，硫分不高于0.8%，热值不低于5000大卡。','采用弱粘煤+贫煤+少量不粘煤配比方案。','方案满足热值和硫分要求，成本适中。','灰分17.2%，硫分0.58%，热值5080kcal/kg',2460000.00,'良好',1,'2026-04-18 16:51:28','2026-04-18 16:51:28'),
-	(2,'C002','常规动力煤供应案例','需求3000吨，热值不低于4600大卡。','采用不粘煤为主，配入少量长焰煤。','方案成本较低，库存消耗合理。','灰分18.8%，硫分1.24%，热值4720kcal/kg',1320000.00,'良好',1,'2026-04-18 16:51:28','2026-04-18 16:51:28'),
-	(3,'C003','高热值配焦案例','需求2000吨，灰分不高于13%，热值高于5300大卡。','采用弱粘煤+1/3焦煤方案。','满足高热值要求，但成本较高。','灰分11.4%，硫分0.62%，热值5620kcal/kg',1325000.00,'优秀',1,'2026-04-18 16:51:28','2026-04-18 16:51:28');
-
-/*!40000 ALTER TABLE `case_sample` ENABLE KEYS */;
-UNLOCK TABLES;
 
 
 # 转储表 coal_quality
 # ------------------------------------------------------------
-
-DROP TABLE IF EXISTS `coal_quality`;
 
 CREATE TABLE `coal_quality` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -135,26 +159,10 @@ CREATE TABLE `coal_quality` (
   CONSTRAINT `fk_quality_coal` FOREIGN KEY (`coal_id`) REFERENCES `coal_type` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='煤质指标表';
 
-LOCK TABLES `coal_quality` WRITE;
-/*!40000 ALTER TABLE `coal_quality` DISABLE KEYS */;
-
-INSERT INTO `coal_quality` (`id`, `coal_id`, `batch_no`, `sample_time`, `ash_content`, `sulfur_content`, `moisture_content`, `volatile_content`, `calorific_value`, `fixed_carbon`, `status`, `create_time`, `update_time`)
-VALUES
-	(1,1,'B202604001','2026-04-01 08:00:00',18.50,0.50,8.20,31.30,3150.00,42.00,1,'2026-04-18 16:50:55','2026-04-18 16:50:55'),
-	(2,2,'B202604002','2026-04-01 08:30:00',20.80,2.50,7.60,29.10,4100.00,42.50,1,'2026-04-18 16:50:55','2026-04-18 16:50:55'),
-	(3,3,'B202604003','2026-04-01 09:00:00',16.20,1.60,6.80,27.50,4850.00,49.50,1,'2026-04-18 16:50:55','2026-04-18 16:50:55'),
-	(4,4,'B202604004','2026-04-01 09:30:00',12.80,0.80,6.20,24.50,5220.00,56.50,1,'2026-04-18 16:50:55','2026-04-18 16:50:55'),
-	(5,5,'B202604005','2026-04-01 10:00:00',11.50,0.30,5.50,18.00,5050.00,65.00,1,'2026-04-18 16:50:55','2026-04-18 16:50:55'),
-	(6,6,'B202604006','2026-04-01 10:30:00',9.20,0.45,4.80,28.00,6450.00,58.00,1,'2026-04-18 16:50:55','2026-04-18 16:50:55');
-
-/*!40000 ALTER TABLE `coal_quality` ENABLE KEYS */;
-UNLOCK TABLES;
 
 
 # 转储表 coal_type
 # ------------------------------------------------------------
-
-DROP TABLE IF EXISTS `coal_type`;
 
 CREATE TABLE `coal_type` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -172,26 +180,10 @@ CREATE TABLE `coal_type` (
   UNIQUE KEY `coal_code` (`coal_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='煤种基础信息表';
 
-LOCK TABLES `coal_type` WRITE;
-/*!40000 ALTER TABLE `coal_type` DISABLE KEYS */;
-
-INSERT INTO `coal_type` (`id`, `coal_code`, `coal_name`, `coal_category`, `source_area`, `purchase_price`, `transport_mode`, `blendable_flag`, `remark`, `create_time`, `update_time`)
-VALUES
-	(1,'CT001','朔州4#长焰煤','长焰煤','山西朔州',420.00,'铁路',1,'低硫动力煤样例','2026-04-18 16:50:39','2026-04-18 16:50:39'),
-	(2,'CT002','朔州9#长焰煤','长焰煤','山西朔州',360.00,'铁路',1,'高硫动力煤样例','2026-04-18 16:50:39','2026-04-18 16:50:39'),
-	(3,'CT003','大同不粘煤','不粘煤','山西大同',460.00,'铁路',1,'中热值动力煤样例','2026-04-18 16:50:39','2026-04-18 16:50:39'),
-	(4,'CT004','大同弱粘煤','弱粘煤','山西大同',520.00,'铁路',1,'配焦/高热值样例','2026-04-18 16:50:39','2026-04-18 16:50:39'),
-	(5,'CT005','河南二1贫煤','贫煤','河南',500.00,'公路',1,'低硫高热值动力煤样例','2026-04-18 16:50:39','2026-04-18 16:50:39'),
-	(6,'CT006','大屯1/3焦煤','1/3焦煤','江苏徐州',780.00,'铁路',1,'高热值低硫焦煤样例','2026-04-18 16:50:39','2026-04-18 16:50:39');
-
-/*!40000 ALTER TABLE `coal_type` ENABLE KEYS */;
-UNLOCK TABLES;
 
 
 # 转储表 inventory
 # ------------------------------------------------------------
-
-DROP TABLE IF EXISTS `inventory`;
 
 CREATE TABLE `inventory` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -207,26 +199,10 @@ CREATE TABLE `inventory` (
   CONSTRAINT `fk_inventory_coal` FOREIGN KEY (`coal_id`) REFERENCES `coal_type` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='库存信息表';
 
-LOCK TABLES `inventory` WRITE;
-/*!40000 ALTER TABLE `inventory` DISABLE KEYS */;
-
-INSERT INTO `inventory` (`id`, `coal_id`, `warehouse_code`, `stock_quantity`, `available_quantity`, `update_time`, `status`, `remark`)
-VALUES
-	(1,1,'W001',12000.00,10000.00,'2026-04-10 08:00:00',1,'长焰煤库存充足'),
-	(2,2,'W002',9000.00,8500.00,'2026-04-10 08:05:00',1,'高硫煤库存较多'),
-	(3,3,'W003',15000.00,13200.00,'2026-04-10 08:10:00',1,'不粘煤主力库存'),
-	(4,4,'W004',8000.00,7600.00,'2026-04-10 08:15:00',1,'弱粘煤库存中等'),
-	(5,5,'W005',6000.00,5200.00,'2026-04-10 08:20:00',1,'低硫贫煤库存偏紧'),
-	(6,6,'W006',3000.00,2600.00,'2026-04-10 08:25:00',1,'焦煤库存较少');
-
-/*!40000 ALTER TABLE `inventory` ENABLE KEYS */;
-UNLOCK TABLES;
 
 
 # 转储表 model_config
 # ------------------------------------------------------------
-
-DROP TABLE IF EXISTS `model_config`;
 
 CREATE TABLE `model_config` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -248,8 +224,6 @@ CREATE TABLE `model_config` (
 # 转储表 orders
 # ------------------------------------------------------------
 
-DROP TABLE IF EXISTS `orders`;
-
 CREATE TABLE `orders` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `order_code` varchar(50) NOT NULL COMMENT '订单编号',
@@ -270,25 +244,31 @@ CREATE TABLE `orders` (
   UNIQUE KEY `order_code` (`order_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='订单需求表';
 
-LOCK TABLES `orders` WRITE;
-/*!40000 ALTER TABLE `orders` DISABLE KEYS */;
 
-INSERT INTO `orders` (`id`, `order_code`, `customer_name`, `demand_quantity`, `target_ash`, `target_sulfur`, `target_moisture`, `target_volatile`, `target_calorific`, `priority_level`, `delivery_date`, `order_status`, `remark`, `create_time`, `update_time`)
-VALUES
-	(1,'O202604001','华东热电厂',5000.00,18.00,0.80,8.50,25.00,5000.00,3,'2026-04-20','pending','低硫动力煤订单','2026-04-18 16:51:12','2026-04-18 16:51:12'),
-	(2,'O202604002','北方建材公司',3000.00,20.00,1.50,9.00,28.00,4600.00,2,'2026-04-22','pending','常规动力煤订单','2026-04-18 16:51:12','2026-04-18 16:51:12'),
-	(3,'O202604003','某钢铁焦化厂',2000.00,13.00,0.90,7.00,24.00,5300.00,3,'2026-04-18','pending','高热值低灰配煤订单','2026-04-18 16:51:12','2026-04-18 16:51:12'),
-	(4,'O202604004','区域供暖中心',4500.00,19.00,1.20,8.80,27.00,4800.00,1,'2026-04-25','pending','供暖季补充订单','2026-04-18 16:51:12','2026-04-18 16:51:12'),
-	(5,'O202604005','南方电力公司',3500.00,17.50,0.60,8.00,24.00,5100.00,3,'2026-04-19','pending','高优先级低硫高热值订单','2026-04-18 16:51:12','2026-04-18 16:51:12');
 
-/*!40000 ALTER TABLE `orders` ENABLE KEYS */;
-UNLOCK TABLES;
+# 转储表 rag_knowledge
+# ------------------------------------------------------------
+
+CREATE TABLE `rag_knowledge` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `knowledge_code` varchar(64) NOT NULL COMMENT '知识编号',
+  `title` varchar(200) NOT NULL COMMENT '知识标题',
+  `knowledge_type` varchar(50) NOT NULL COMMENT '知识类型：rule/case/term/doc',
+  `content` text NOT NULL COMMENT '知识正文',
+  `source_table` varchar(100) DEFAULT NULL COMMENT '来源表',
+  `source_id` bigint DEFAULT NULL COMMENT '来源记录ID',
+  `tags` varchar(500) DEFAULT NULL COMMENT '标签',
+  `status` tinyint NOT NULL DEFAULT '1' COMMENT '状态：1启用，0停用',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_knowledge_code` (`knowledge_code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='RAG统一知识检索表';
+
 
 
 # 转储表 rule_knowledge
 # ------------------------------------------------------------
-
-DROP TABLE IF EXISTS `rule_knowledge`;
 
 CREATE TABLE `rule_knowledge` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -306,25 +286,10 @@ CREATE TABLE `rule_knowledge` (
   UNIQUE KEY `rule_code` (`rule_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='规则知识表';
 
-LOCK TABLES `rule_knowledge` WRITE;
-/*!40000 ALTER TABLE `rule_knowledge` DISABLE KEYS */;
-
-INSERT INTO `rule_knowledge` (`id`, `rule_code`, `rule_name`, `rule_type`, `rule_content`, `applicable_scope`, `priority_level`, `status`, `source_desc`, `create_time`, `update_time`)
-VALUES
-	(1,'R001','高硫煤限配规则','配比约束','当订单硫分上限小于等于0.8%时，高硫煤种配比不得超过10%。','低硫订单',5,1,'测试规则','2026-04-18 16:51:19','2026-04-18 16:51:19'),
-	(2,'R002','低硫煤优先规则','经验规则','当目标发热量高于5000且硫分要求严格时，优先调用低硫贫煤和弱粘煤。','高热值低硫订单',4,1,'测试规则','2026-04-18 16:51:19','2026-04-18 16:51:19'),
-	(3,'R003','库存保护规则','库存约束','可用库存低于3000吨的煤种仅在高优先级订单中参与配煤。','全部订单',5,1,'测试规则','2026-04-18 16:51:19','2026-04-18 16:51:19'),
-	(4,'R004','高热值补偿规则','质量约束','当基础动力煤热值不足时，可引入高热值煤种进行补偿，但成本需同步评估。','热值不足场景',3,1,'测试规则','2026-04-18 16:51:19','2026-04-18 16:51:19'),
-	(5,'R005','高灰分限制规则','质量约束','当订单灰分上限小于18%时，灰分高于20%的煤种不得作为主配煤种。','低灰订单',5,1,'测试规则','2026-04-18 16:51:19','2026-04-18 16:51:19');
-
-/*!40000 ALTER TABLE `rule_knowledge` ENABLE KEYS */;
-UNLOCK TABLES;
 
 
 # 转储表 sys_user
 # ------------------------------------------------------------
-
-DROP TABLE IF EXISTS `sys_user`;
 
 CREATE TABLE `sys_user` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -341,15 +306,6 @@ CREATE TABLE `sys_user` (
   UNIQUE KEY `username` (`username`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='用户表';
 
-LOCK TABLES `sys_user` WRITE;
-/*!40000 ALTER TABLE `sys_user` DISABLE KEYS */;
-
-INSERT INTO `sys_user` (`id`, `username`, `password`, `real_name`, `role`, `phone`, `email`, `status`, `create_time`, `update_time`)
-VALUES
-	(1,'admin','123456','系统管理员','admin','13800000000','admin@test.com',1,'2026-04-18 16:51:35','2026-04-18 16:51:35');
-
-/*!40000 ALTER TABLE `sys_user` ENABLE KEYS */;
-UNLOCK TABLES;
 
 
 

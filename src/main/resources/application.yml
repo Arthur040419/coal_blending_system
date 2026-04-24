@@ -27,3 +27,16 @@ springdoc:
 logging:
   level:
     com.coalblend.mapper: debug
+
+# 大模型解释生成：为 false 时不发起 HTTP，直接使用兜底文案（无密钥/离线开发可设 false）
+coal:
+  llm:
+    enabled: ${COAL_LLM_ENABLED:true}
+    connect-timeout: ${COAL_LLM_CONNECT_TIMEOUT:30s}
+    read-timeout: ${COAL_LLM_READ_TIMEOUT:10m}
+    # <= 0 表示不主动传 max_tokens，避免系统侧截断模型输出
+    max-tokens: ${COAL_LLM_MAX_TOKENS:0}
+    fallback-explanation: "系统根据订单质量约束、库存情况和规则知识生成了当前推荐方案。该方案综合考虑成本与约束可行性，具有较好的执行可行性。"
+    fallback-rule-basis: "当前为系统兜底说明：未调用大模型时无法自动生成与命中规则一一对应的依据条文，请在启用模型后重新生成方案。"
+    fallback-risk-tip: "请关注库存余量与现场执行偏差，以上为系统兜底风险提示。"
+    fallback-optimize-suggestion: "可在「模型配置」中填写兼容 OpenAI Chat Completions 的接口地址与密钥，并将状态设为启用后重新生成方案，以获得大模型生成的细化建议。"

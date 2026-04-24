@@ -8,22 +8,31 @@ import com.coalblend.common.exception.BusinessException;
 import com.coalblend.dto.BlendGenerateDTO;
 import com.coalblend.entity.BlendPlan;
 import com.coalblend.entity.BlendPlanDetail;
-import com.coalblend.entity.CaseSample;
+import com.coalblend.dto.knowledge.KnowledgeContextDTO;
 import com.coalblend.entity.CoalQuality;
 import com.coalblend.entity.CoalType;
 import com.coalblend.entity.Inventory;
 import com.coalblend.entity.Orders;
-import com.coalblend.entity.RuleKnowledge;
 import com.coalblend.mapper.BlendPlanDetailMapper;
 import com.coalblend.mapper.BlendPlanMapper;
-import com.coalblend.mapper.CaseSampleMapper;
 import com.coalblend.mapper.CoalQualityMapper;
 import com.coalblend.mapper.CoalTypeMapper;
 import com.coalblend.mapper.InventoryMapper;
 import com.coalblend.mapper.OrdersMapper;
-import com.coalblend.mapper.RuleKnowledgeMapper;
 import com.coalblend.service.BlendPlanService;
+import com.coalblend.service.intelligent.ModelInferenceService;
+import com.coalblend.service.intelligent.PlanScoreService;
+import com.coalblend.service.intelligent.model.ConstraintResult;
+import com.coalblend.service.intelligent.model.EvaluatedPlanDraft;
+import com.coalblend.service.intelligent.model.PlanCoalSnapshot;
+import com.coalblend.service.intelligent.model.ScoreDetail;
+import com.coalblend.service.knowledge.CaseMatchService;
+import com.coalblend.service.knowledge.KnowledgeAssembleService;
+import com.coalblend.service.knowledge.RuleMatchService;
+import com.coalblend.vo.AiExplainResultVO;
 import com.coalblend.vo.blend.BlendGenerateResultVO;
+import com.coalblend.vo.knowledge.MatchedCaseVO;
+import com.coalblend.vo.knowledge.MatchedRuleVO;
 import com.coalblend.vo.blend.PlanDetailVO;
 import com.coalblend.vo.blend.PlanWithDetailsVO;
 import lombok.RequiredArgsConstructor;
@@ -46,7 +55,9 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class BlendPlanServiceImpl implements BlendPlanService {
 
-    private static final BigDecimal HUNDRED = new BigDecimal("100");
+    private static final BigDecimal RATIO_STEP = new BigDecimal("0.10");
+    private static final int MAX_SHORTLIST_COALS = 5;
+    private static final int MAX_RETURN_PLANS = 4;
 
     private final BlendPlanMapper blendPlanMapper;
     private final BlendPlanDetailMapper blendPlanDetailMapper;
@@ -54,8 +65,11 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private final InventoryMapper inventoryMapper;
     private final CoalTypeMapper coalTypeMapper;
     private final CoalQualityMapper coalQualityMapper;
-    private final RuleKnowledgeMapper ruleKnowledgeMapper;
-    private final CaseSampleMapper caseSampleMapper;
+    private final RuleMatchService ruleMatchService;
+    private final CaseMatchService caseMatchService;
+    private final KnowledgeAssembleService knowledgeAssembleService;
+    private final ModelInferenceService modelInferenceService;
+    private final PlanScoreService planScoreService;
 
     @Override
     public IPage<BlendPlan> page(long current, long size, Long orderId, String planStatus, String planCode,
@@ -174,34 +188,42 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             }
         }
 
-        List<Long> ranked = candidateCoalIds.stream()
+        List<PlanCoalSnapshot> shortlisted = candidateCoalIds.stream()
                 .filter(qualityMap::containsKey)
-                .sorted(Comparator.comparing(cid -> nz(qualityMap.get(cid).getSulfurContent())))
-                .limit(3)
+                .map(cid -> new PlanCoalSnapshot(cid, typeMap.get(cid), qualityMap.get(cid), bestInv.get(cid)))
+                .filter(s -> s.getType() != null && s.getQuality() != null && s.getInventory() != null)
+                .sorted(Comparator
+                        .comparing((PlanCoalSnapshot s) -> shortlistScore(order, s)).reversed()
+                        .thenComparing(s -> nzSort(s.getQuality().getSulfurContent()))
+                        .thenComparing(s -> nzSort(s.getType().getPurchasePrice())))
+                .limit(MAX_SHORTLIST_COALS)
                 .collect(Collectors.toList());
 
-        if (ranked.size() < 2) {
+        if (shortlisted.size() < 2) {
             throw new BusinessException(400, "可用煤种或煤质数据不足，无法生成方案");
         }
 
-        long ts = System.currentTimeMillis();
-        List<BigDecimal> r1 = baseRatios(ranked.size(), true);
-        List<BigDecimal> r2 = baseRatios(ranked.size(), false);
+        List<Long> shortlistedCoalIds = shortlisted.stream()
+                .map(PlanCoalSnapshot::getCoalId)
+                .collect(Collectors.toList());
+        List<MatchedRuleVO> matchedRules = ruleMatchService.match(order, shortlistedCoalIds, bestInv);
+        List<MatchedCaseVO> matchedCases = caseMatchService.match(order, shortlistedCoalIds, matchedRules);
 
-        ScoredPlan sp1 = buildAndPersist(order, ranked, r1, ts + "A", "推荐方案-A", dto.getCreateBy(), typeMap, qualityMap, bestInv);
-        ScoredPlan sp2 = buildAndPersist(order, ranked, r2, ts + "B", "候选方案-B", dto.getCreateBy(), typeMap, qualityMap, bestInv);
+        List<EvaluatedPlanDraft> drafts = buildCandidateDrafts(order, shortlisted);
+        List<EvaluatedPlanDraft> preferred = drafts.stream()
+                .filter(d -> d.getConstraintResult().isFeasible())
+                .limit(MAX_RETURN_PLANS)
+                .collect(Collectors.toList());
+        if (preferred.isEmpty()) {
+            preferred = drafts.stream().limit(MAX_RETURN_PLANS).collect(Collectors.toList());
+        }
+        if (preferred.isEmpty()) {
+            throw new BusinessException(400, "未能生成可用配煤方案，请检查煤质和库存数据");
+        }
 
-        ScoredPlan best = sp1.overall.compareTo(sp2.overall) >= 0 ? sp1 : sp2;
-        ScoredPlan other = best == sp1 ? sp2 : sp1;
-
-        List<RuleKnowledge> rules = ruleKnowledgeMapper.selectList(new LambdaQueryWrapper<RuleKnowledge>()
-                .eq(RuleKnowledge::getStatus, 1)
-                .orderByDesc(RuleKnowledge::getPriorityLevel)
-                .last("limit 8"));
-        List<CaseSample> cases = caseSampleMapper.selectList(new LambdaQueryWrapper<CaseSample>()
-                .eq(CaseSample::getStatus, 1)
-                .orderByDesc(CaseSample::getId)
-                .last("limit 5"));
+        List<ScoredPlan> persistedPlans = persistPlans(order, preferred, dto.getCreateBy(), typeMap);
+        ScoredPlan best = persistedPlans.get(0);
+        List<ScoredPlan> others = persistedPlans.subList(1, persistedPlans.size());
 
         Orders orderPatch = new Orders();
         orderPatch.setId(order.getId());
@@ -211,151 +233,206 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         BlendGenerateResultVO vo = new BlendGenerateResultVO();
         vo.setOrder(ordersMapper.selectById(order.getId()));
         vo.setConstraints(constraints);
+        constraints.put("shortlistedCoalCount", shortlisted.size());
+        constraints.put("generatedPlanCount", persistedPlans.size());
+        constraints.put("feasiblePlanCount", drafts.stream().filter(d -> d.getConstraintResult().isFeasible()).count());
+        PlanWithDetailsVO recommended = toVo(best.planId, typeMap);
+        vo.setRecommendedPlan(recommended);
+        vo.setCandidatePlans(others.stream().map(p -> toVo(p.planId, typeMap)).collect(Collectors.toList()));
+        vo.setMatchedRules(matchedRules);
+        vo.setMatchedCases(matchedCases);
+        KnowledgeContextDTO knowledgeContext = knowledgeAssembleService.assemble(
+                order, constraints, typeMap, bestInv, shortlistedCoalIds, matchedRules, matchedCases,
+                recommended, order.getDemandQuantity());
+        vo.setKnowledgeContext(knowledgeContext);
+        vo.setKnowledgeSummary(knowledgeAssembleService.summarize(knowledgeContext));
+
+        AiExplainResultVO ai = modelInferenceService.enrichRecommendedPlan(
+                best.planId, order, recommended, matchedRules, matchedCases, knowledgeContext);
         vo.setRecommendedPlan(toVo(best.planId, typeMap));
-        vo.setCandidatePlans(List.of(toVo(other.planId, typeMap)));
-        vo.setMatchedRules(rules);
-        vo.setMatchedCases(cases);
-        vo.setExplainSummary("本结果为规则筛选与线性加权评分后的简化方案，用于毕设演示；后续可接入优化算法或大模型解释。");
+        vo.setExplainSummary(buildAiSummaryLine(ai));
         return vo;
     }
 
-    private static BigDecimal nz(BigDecimal v) {
+    /**
+     * 接口中的摘要字段：完整拼接 AI 三段输出，不做长度截断（前端以滚动区域展示）。
+     */
+    private static String buildAiSummaryLine(AiExplainResultVO air) {
+        if (air == null) {
+            return "方案已生成。";
+        }
+        String prefix = air.isAiGenerated() ? "【大模型已生成解释】" : "【使用兜底说明】";
+        String model = StringUtils.hasText(air.getModelNameUsed()) ? ("（" + air.getModelNameUsed() + "）") : "";
+        String ex = air.getExplanation() == null ? "" : air.getExplanation().trim();
+        String rb = air.getRuleBasis() == null ? "" : air.getRuleBasis().trim();
+        String risk = air.getRiskTip() == null ? "" : air.getRiskTip().trim();
+        String opt = air.getOptimizeSuggestion() == null ? "" : air.getOptimizeSuggestion().trim();
+        StringBuilder body = new StringBuilder();
+        if (StringUtils.hasText(ex)) {
+            body.append("【方案说明】\n").append(ex);
+        }
+        if (StringUtils.hasText(rb)) {
+            if (!body.isEmpty()) {
+                body.append("\n\n");
+            }
+            body.append("【规则依据】\n").append(rb);
+        }
+        if (StringUtils.hasText(risk)) {
+            if (!body.isEmpty()) {
+                body.append("\n\n");
+            }
+            body.append("【风险提示】\n").append(risk);
+        }
+        if (StringUtils.hasText(opt)) {
+            if (!body.isEmpty()) {
+                body.append("\n\n");
+            }
+            body.append("【优化建议】\n").append(opt);
+        }
+        if (body.isEmpty()) {
+            body.append("方案已生成。");
+        }
+        return prefix + model + "\n" + body;
+    }
+
+    private static BigDecimal nzSort(BigDecimal v) {
         return v == null ? BigDecimal.valueOf(Double.MAX_VALUE) : v;
     }
 
-    private List<BigDecimal> baseRatios(int n, boolean first) {
-        List<BigDecimal> raw = new ArrayList<>();
-        if (n >= 3) {
-            if (first) {
-                raw.add(new BigDecimal("0.5"));
-                raw.add(new BigDecimal("0.3"));
-                raw.add(new BigDecimal("0.2"));
-            } else {
-                raw.add(new BigDecimal("0.4"));
-                raw.add(new BigDecimal("0.4"));
-                raw.add(new BigDecimal("0.2"));
+    private BigDecimal shortlistScore(Orders order, PlanCoalSnapshot s) {
+        BigDecimal score = BigDecimal.ZERO;
+        CoalQuality q = s.getQuality();
+        Inventory inv = s.getInventory();
+        CoalType t = s.getType();
+        if (order.getTargetSulfur() != null && q.getSulfurContent() != null) {
+            score = score.add(order.getTargetSulfur().subtract(q.getSulfurContent()).multiply(new BigDecimal("25")));
+        }
+        if (order.getTargetCalorific() != null && q.getCalorificValue() != null) {
+            score = score.add(q.getCalorificValue().subtract(order.getTargetCalorific()).divide(new BigDecimal("100"), 4, RoundingMode.HALF_UP));
+        }
+        if (inv.getAvailableQuantity() != null) {
+            score = score.add(inv.getAvailableQuantity().divide(new BigDecimal("1000"), 4, RoundingMode.HALF_UP));
+        }
+        if (t.getPurchasePrice() != null) {
+            score = score.subtract(t.getPurchasePrice().divide(new BigDecimal("50"), 4, RoundingMode.HALF_UP));
+        }
+        return score;
+    }
+
+    private List<EvaluatedPlanDraft> buildCandidateDrafts(Orders order, List<PlanCoalSnapshot> shortlisted) {
+        List<List<PlanCoalSnapshot>> combinations = buildCombinations(shortlisted);
+        List<EvaluatedPlanDraft> drafts = new ArrayList<>();
+        for (List<PlanCoalSnapshot> combo : combinations) {
+            for (List<BigDecimal> ratios : buildRatioTemplates(combo.size())) {
+                drafts.add(planScoreService.evaluate(order, combo, ratios));
             }
-        } else {
-            if (first) {
-                raw.add(new BigDecimal("0.6"));
-                raw.add(new BigDecimal("0.4"));
-            } else {
-                raw.add(new BigDecimal("0.5"));
-                raw.add(new BigDecimal("0.5"));
+        }
+        drafts.sort(Comparator
+                .comparing((EvaluatedPlanDraft d) -> d.getConstraintResult().isFeasible(), Comparator.reverseOrder())
+                .thenComparing(d -> d.getScoreDetail().getOverallScore(), Comparator.reverseOrder())
+                .thenComparing(EvaluatedPlanDraft::getTotalCost));
+        return drafts;
+    }
+
+    private List<List<PlanCoalSnapshot>> buildCombinations(List<PlanCoalSnapshot> shortlisted) {
+        List<List<PlanCoalSnapshot>> combinations = new ArrayList<>();
+        for (int i = 0; i < shortlisted.size(); i++) {
+            for (int j = i + 1; j < shortlisted.size(); j++) {
+                combinations.add(List.of(shortlisted.get(i), shortlisted.get(j)));
+                for (int k = j + 1; k < shortlisted.size(); k++) {
+                    combinations.add(List.of(shortlisted.get(i), shortlisted.get(j), shortlisted.get(k)));
+                }
             }
         }
-        BigDecimal sum = raw.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
-        return raw.stream().map(b -> b.divide(sum, 6, RoundingMode.HALF_UP)).collect(Collectors.toList());
+        return combinations;
     }
 
-    private ScoredPlan buildAndPersist(Orders order, List<Long> coalIds, List<BigDecimal> ratios, String planCode,
-                                       String planName, Long createBy, Map<Long, CoalType> typeMap,
-                                       Map<Long, CoalQuality> qualityMap, Map<Long, Inventory> invMap) {
-        BigDecimal wAsh = BigDecimal.ZERO;
-        BigDecimal wS = BigDecimal.ZERO;
-        BigDecimal wM = BigDecimal.ZERO;
-        BigDecimal wV = BigDecimal.ZERO;
-        BigDecimal wCal = BigDecimal.ZERO;
-        BigDecimal totalCost = BigDecimal.ZERO;
-
-        for (int i = 0; i < coalIds.size(); i++) {
-            Long cid = coalIds.get(i);
-            BigDecimal r = ratios.get(i);
-            CoalQuality q = qualityMap.get(cid);
-            CoalType t = typeMap.get(cid);
-            BigDecimal useQty = order.getDemandQuantity().multiply(r).setScale(2, RoundingMode.HALF_UP);
-            BigDecimal price = t.getPurchasePrice() == null ? BigDecimal.ZERO : t.getPurchasePrice();
-            totalCost = totalCost.add(useQty.multiply(price));
-            wAsh = wAsh.add(nz(q.getAshContent()).multiply(r));
-            wS = wS.add(nz(q.getSulfurContent()).multiply(r));
-            wM = wM.add(nz(q.getMoistureContent()).multiply(r));
-            wV = wV.add(nz(q.getVolatileContent()).multiply(r));
-            wCal = wCal.add(nz(q.getCalorificValue()).multiply(r));
+    private List<List<BigDecimal>> buildRatioTemplates(int size) {
+        List<List<BigDecimal>> ratios = new ArrayList<>();
+        if (size == 2) {
+            for (int a = 2; a <= 8; a++) {
+                int b = 10 - a;
+                ratios.add(List.of(scaleRatio(a), scaleRatio(b)));
+            }
+            return ratios;
         }
-
-        BigDecimal pAsh = wAsh.setScale(2, RoundingMode.HALF_UP);
-        BigDecimal pS = wS.setScale(2, RoundingMode.HALF_UP);
-        BigDecimal pM = wM.setScale(2, RoundingMode.HALF_UP);
-        BigDecimal pV = wV.setScale(2, RoundingMode.HALF_UP);
-        BigDecimal pCal = wCal.setScale(2, RoundingMode.HALF_UP);
-
-        List<BlendPlanDetail> details = new ArrayList<>();
-        for (int i = 0; i < coalIds.size(); i++) {
-            Long cid = coalIds.get(i);
-            BigDecimal r = ratios.get(i);
-            CoalType t = typeMap.get(cid);
-            BigDecimal useQty = order.getDemandQuantity().multiply(r).setScale(2, RoundingMode.HALF_UP);
-            BigDecimal price = t.getPurchasePrice() == null ? BigDecimal.ZERO : t.getPurchasePrice();
-            BlendPlanDetail d = new BlendPlanDetail();
-            d.setCoalId(cid);
-            d.setBlendRatio(r);
-            d.setUseQuantity(useQty);
-            d.setPredictedAsh(pAsh);
-            d.setPredictedSulfur(pS);
-            d.setPredictedMoisture(pM);
-            d.setPredictedVolatile(pV);
-            d.setPredictedCalorific(pCal);
-            d.setUnitCost(price);
-            details.add(d);
+        if (size == 3) {
+            for (int a = 2; a <= 6; a++) {
+                for (int b = 2; b <= 6; b++) {
+                    int c = 10 - a - b;
+                    if (c < 2 || c > 6) {
+                        continue;
+                    }
+                    ratios.add(List.of(scaleRatio(a), scaleRatio(b), scaleRatio(c)));
+                }
+            }
+            return ratios;
         }
-
-        BigDecimal qualityScore = scoreQuality(order, pAsh, pS, pM, pCal);
-        BigDecimal costScore = scoreCost(totalCost, order.getDemandQuantity());
-        BigDecimal stabilityScore = new BigDecimal("78.0");
-        BigDecimal overall = qualityScore.add(costScore).add(stabilityScore)
-                .divide(new BigDecimal("3"), 2, RoundingMode.HALF_UP);
-
-        BlendPlan plan = new BlendPlan();
-        plan.setPlanCode("P" + planCode);
-        plan.setOrderId(order.getId());
-        plan.setPlanName(planName);
-        plan.setTotalCost(totalCost.setScale(2, RoundingMode.HALF_UP));
-        plan.setQualityScore(qualityScore);
-        plan.setCostScore(costScore);
-        plan.setStabilityScore(stabilityScore);
-        plan.setOverallScore(overall);
-        plan.setPlanStatus("generated");
-        plan.setExplanation("加权预测灰分 " + pAsh + "%，硫分 " + pS + "%，发热量 " + pCal.setScale(0, RoundingMode.HALF_UP) + "。");
-        plan.setRiskTip(invMap.values().stream().anyMatch(v -> v.getAvailableQuantity().compareTo(new BigDecimal("3000")) < 0)
-                ? "部分煤种库存偏紧，请关注执行风险。" : null);
-        plan.setCreateBy(createBy);
-        blendPlanMapper.insert(plan);
-        for (BlendPlanDetail d : details) {
-            d.setPlanId(plan.getId());
-            blendPlanDetailMapper.insert(d);
-        }
-        return new ScoredPlan(plan.getId(), overall);
+        return List.of(List.of(BigDecimal.ONE));
     }
 
-    private BigDecimal scoreQuality(Orders order, BigDecimal ash, BigDecimal s, BigDecimal m, BigDecimal cal) {
-        BigDecimal score = HUNDRED;
-        if (order.getTargetSulfur() != null && s.compareTo(order.getTargetSulfur()) > 0) {
-            score = score.subtract(new BigDecimal("25"));
-        }
-        if (order.getTargetAsh() != null && ash.compareTo(order.getTargetAsh()) > 0) {
-            score = score.subtract(new BigDecimal("15"));
-        }
-        if (order.getTargetCalorific() != null && cal.compareTo(order.getTargetCalorific()) < 0) {
-            score = score.subtract(new BigDecimal("20"));
-        }
-        if (order.getTargetMoisture() != null && m.compareTo(order.getTargetMoisture()) > 0) {
-            score = score.subtract(new BigDecimal("10"));
-        }
-        if (score.compareTo(BigDecimal.ZERO) < 0) {
-            score = BigDecimal.ZERO;
-        }
-        return score.setScale(2, RoundingMode.HALF_UP);
+    private BigDecimal scaleRatio(int tenths) {
+        return new BigDecimal(tenths).multiply(RATIO_STEP).setScale(4, RoundingMode.HALF_UP);
     }
 
-    private BigDecimal scoreCost(BigDecimal totalCost, BigDecimal demand) {
-        if (demand == null || demand.compareTo(BigDecimal.ZERO) <= 0) {
-            return new BigDecimal("70.0");
+    private List<ScoredPlan> persistPlans(Orders order, List<EvaluatedPlanDraft> drafts, Long createBy,
+                                          Map<Long, CoalType> typeMap) {
+        long ts = System.currentTimeMillis();
+        List<ScoredPlan> persisted = new ArrayList<>();
+        for (int i = 0; i < drafts.size(); i++) {
+            EvaluatedPlanDraft draft = drafts.get(i);
+            ConstraintResult constraint = draft.getConstraintResult();
+            ScoreDetail score = draft.getScoreDetail();
+            String suffix = String.valueOf((char) ('A' + i));
+            String planName = i == 0 ? "推荐方案-" + suffix : "候选方案-" + suffix;
+            BlendPlan plan = new BlendPlan();
+            plan.setPlanCode("P" + ts + suffix);
+            plan.setOrderId(order.getId());
+            plan.setPlanName(planName);
+            plan.setTotalCost(draft.getTotalCost());
+            plan.setQualityScore(score.getQualityScore());
+            plan.setCostScore(score.getCostScore());
+            plan.setStabilityScore(score.getStabilityScore());
+            plan.setOverallScore(score.getOverallScore());
+            plan.setPlanStatus("generated");
+            plan.setExplanation(draft.getExplanation());
+            plan.setRiskTip(draft.getRiskTip());
+            plan.setFeasibleFlag(constraint.isFeasible() ? 1 : 0);
+            plan.setConstraintSummary(buildConstraintSummary(constraint));
+            plan.setScoreDetail(buildScoreDetailSummary(score));
+            plan.setRiskLevel(constraint.riskLevel());
+            plan.setCreateBy(createBy);
+            blendPlanMapper.insert(plan);
+            for (BlendPlanDetail d : draft.getDetails()) {
+                d.setPlanId(plan.getId());
+                blendPlanDetailMapper.insert(d);
+            }
+            persisted.add(new ScoredPlan(plan.getId(), score.getOverallScore()));
         }
-        BigDecimal unit = totalCost.divide(demand, 4, RoundingMode.HALF_UP);
-        BigDecimal ref = new BigDecimal("500");
-        BigDecimal ratio = ref.divide(unit.max(new BigDecimal("1")), 4, RoundingMode.HALF_UP);
-        BigDecimal s = ratio.multiply(new BigDecimal("80")).min(HUNDRED).max(new BigDecimal("40"));
-        return s.setScale(2, RoundingMode.HALF_UP);
+        return persisted;
+    }
+
+    private String buildConstraintSummary(ConstraintResult c) {
+        String violations = c.getViolations().isEmpty() ? "无" : String.join("；", c.getViolations());
+        String warnings = c.getWarnings().isEmpty() ? "无" : String.join("；", c.getWarnings());
+        return "可行性：" + (c.isFeasible() ? "可行" : "不可行")
+                + "；预测灰分：" + fmt(c.getPredictedAsh())
+                + "%；预测硫分：" + fmt(c.getPredictedSulfur())
+                + "%；预测水分：" + fmt(c.getPredictedMoisture())
+                + "%；预测热值：" + fmt(c.getPredictedCalorific())
+                + "；违反项：" + violations
+                + "；风险提示：" + warnings;
+    }
+
+    private String buildScoreDetailSummary(ScoreDetail s) {
+        return "质量评分：" + fmt(s.getQualityScore()) + "（" + s.getQualityReason() + "）"
+                + "；成本评分：" + fmt(s.getCostScore()) + "（" + s.getCostReason() + "）"
+                + "；稳定性评分：" + fmt(s.getStabilityScore()) + "（" + s.getStabilityReason() + "）"
+                + "；综合评分：" + fmt(s.getOverallScore()) + "（" + s.getOverallReason() + "）";
+    }
+
+    private String fmt(BigDecimal value) {
+        return value == null ? "—" : value.stripTrailingZeros().toPlainString();
     }
 
     private PlanWithDetailsVO toVo(Long planId, Map<Long, CoalType> typeMap) {
@@ -389,4 +466,5 @@ public class BlendPlanServiceImpl implements BlendPlanService {
 
     private record ScoredPlan(Long planId, BigDecimal overall) {
     }
+
 }

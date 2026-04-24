@@ -1,2 +1,31 @@
 # coal_blending_system
-本科毕业设计-基于大模型的智能配煤系统
+
+本科毕业设计：煤矿智能配煤管理系统后端。
+
+## 大模型解释生成
+
+实现说明见仓库根目录 `docs/系统接入大模型解释生成的实现方案.md`。配煤主流程在 `/blendPlan/generate` 评分完成后调用 **OpenAI Chat Completions 兼容接口**（如 Ollama、国内兼容网关），将结果写入 `blend_plan.explanation`、`risk_tip`、`optimize_suggestion` 等字段。
+
+### 数据库
+
+首次部署请在目标库执行：
+
+- `db/patch_blend_plan_ai_columns.sql`（新增 AI 相关列）
+- `db/patch_blend_plan_rule_basis.sql`（第2步：新增 `rule_basis` 规则依据列）
+- `db/patch_blend_plan_core_columns.sql`（第1阶段：新增可行性、约束摘要、评分明细、风险等级列）
+- `db/patch_blend_plan_feedback.sql`（第2阶段：新增方案执行反馈与案例回流表）
+- `db/patch_feedback_case_fk_set_null.sql`（修正反馈回流案例外键，允许案例维护时保留反馈记录）
+- 可选：`db/seed_llm_model_config_example.sql`（示例模型配置，默认不启用）
+
+### 配置
+
+- 在表 `model_config` 中维护 **`status = 1`** 且 **`api_url` 非空** 的一条记录；`api_url` 为完整地址，例如 `http://127.0.0.1:11434/v1/chat/completions`（Ollama）。
+- `application.yml` 中 `coal.llm`：无密钥或离线开发可设环境变量 **`COAL_LLM_ENABLED=false`**，将直接使用兜底文案且不发起 HTTP。
+
+## 知识库（第 1 步落地）
+
+说明见 `docs/第1步知识库落地的详细实现方案.md`。`/blendPlan/generate` 会调用 **规则匹配**、**案例检索**、**知识组装**，在返回体中附带 `matchedRules`（含 `hitReason`）、`matchedCases`（含 `matchReason`/`summary`）、`knowledgeSummary`、`knowledgeContext`（含可拼 Prompt 的 `orderText`/`inventoryText`/`rulesText`/`casesText`）。
+
+第 2 步「知识库与大模型结合」见 `docs/第2步知识库与大模型结合的实现方案.md`：在确定推荐方案后组装 **`planText`** 与方案相关 **库存叙述**，使用 **知识增强四段式 Prompt**（方案说明 / 规则依据 / 风险提示 / 优化建议），解析结果写入 `blend_plan.rule_basis` 等字段。
+
+可选执行 `db/seed_knowledge_step1.sql` 补充规则 R006～R012 与案例 C004～C010（按 `rule_code`/`case_code` 幂等更新）。
