@@ -17,4 +17,8 @@ public class EvaluatedPlanDraft {
     private ScoreDetail scoreDetail;
     private String explanation;
     private String riskTip;
+    /** 候选来源：system/ai/hybrid */
+    private String candidateSource = "system";
+    /** 大模型生成候选方案时给出的策略/理由 */
+    private String aiCandidateReason;
 }

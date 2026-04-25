@@ -30,6 +30,10 @@ logging:
 
 # 大模型解释生成：为 false 时不发起 HTTP，直接使用兜底文案（无密钥/离线开发可设 false）
 coal:
+  blend:
+    # 当前实验阶段默认关闭系统枚举，仅使用 AI 候选 + 既有评分标准，便于优化前后对比。
+    # 如需恢复系统枚举，可设置 COAL_BLEND_ENABLE_SYSTEM_ENUMERATION=true。
+    enable-system-enumeration: ${COAL_BLEND_ENABLE_SYSTEM_ENUMERATION:false}
   llm:
     enabled: ${COAL_LLM_ENABLED:true}
     connect-timeout: ${COAL_LLM_CONNECT_TIMEOUT:30s}

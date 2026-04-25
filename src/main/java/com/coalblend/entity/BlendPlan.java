@@ -51,6 +51,10 @@ public class BlendPlan {
     private String finalProductBatchNo;
     /** 追溯状态：not_executed/executed/inspected/shipped */
     private String traceStatus;
+    /** 候选来源：system/ai/hybrid */
+    private String candidateSource;
+    /** AI候选生成理由 */
+    private String aiCandidateReason;
     private Long createBy;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

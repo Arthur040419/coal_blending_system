@@ -125,6 +125,10 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", modelName);
         body.put("stream", false);
+        if (isOllamaNativeChatUrl(url)) {
+            // Qwen3/Ollama may otherwise return final text in message.thinking with empty content.
+            body.put("think", false);
+        }
         ArrayNode messages = body.putArray("messages");
         ObjectNode userMsg = messages.addObject();
         userMsg.put("role", "user");
@@ -159,26 +163,86 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
             throw new IllegalStateException("bad status " + resp.getStatusCode());
         }
         JsonNode root = objectMapper.readTree(resp.getBody());
-        JsonNode choices = root.path("choices");
-        if (!choices.isArray() || choices.isEmpty()) {
-            throw new IllegalStateException("no choices");
-        }
-        JsonNode firstChoice = choices.get(0);
-        String content = extractContent(firstChoice);
-        String finishReason = firstChoice.path("finish_reason").asText("");
+        String content = extractChatResponseContent(root);
+        String finishReason = extractFinishReason(root);
         if ("length".equalsIgnoreCase(finishReason)) {
             log.warn("LLM output may be truncated by max_tokens (finish_reason=length)");
         }
         if (!StringUtils.hasText(content)) {
-            String snippet = resp.getBody();
-            if (snippet != null && snippet.length() > 600) {
-                snippet = snippet.substring(0, 600) + "...";
-            }
-            log.warn("LLM response has empty content. choice[0]={}", firstChoice);
+            String snippet = snippet(resp.getBody());
+            log.warn("LLM response has no parsable content. response={}", snippet);
             log.debug("LLM raw response snippet: {}", snippet);
-            throw new IllegalStateException("empty content");
+            throw new IllegalStateException("empty model content: " + snippet);
         }
         return content;
+    }
+
+    private static boolean isOllamaNativeChatUrl(String url) {
+        return StringUtils.hasText(url) && url.contains("/api/chat");
+    }
+
+    private static String extractChatResponseContent(JsonNode root) {
+        if (root == null || root.isMissingNode() || root.isNull()) {
+            return "";
+        }
+
+        // OpenAI-compatible Chat Completions: choices[0].message.content
+        JsonNode choices = root.path("choices");
+        if (choices.isArray() && !choices.isEmpty()) {
+            String content = extractContent(choices.get(0));
+            if (StringUtils.hasText(content)) {
+                return content;
+            }
+        }
+
+        // Ollama native /api/chat: { "message": { "content": "..." } }
+        JsonNode ollamaMessageContent = root.path("message").path("content");
+        if (ollamaMessageContent.isTextual() && StringUtils.hasText(ollamaMessageContent.asText())) {
+            return ollamaMessageContent.asText();
+        }
+        JsonNode ollamaThinking = root.path("message").path("thinking");
+        if (ollamaThinking.isTextual() && StringUtils.hasText(ollamaThinking.asText())) {
+            String jsonText = extractJsonObject(ollamaThinking.asText());
+            if (StringUtils.hasText(jsonText)) {
+                return jsonText;
+            }
+        }
+
+        // Ollama native /api/generate: { "response": "..." }
+        JsonNode ollamaGenerateResponse = root.path("response");
+        if (ollamaGenerateResponse.isTextual() && StringUtils.hasText(ollamaGenerateResponse.asText())) {
+            return ollamaGenerateResponse.asText();
+        }
+
+        // Some providers expose the final text on the root node.
+        String[] rootTextFields = {"output_text", "text", "content"};
+        for (String field : rootTextFields) {
+            JsonNode n = root.path(field);
+            if (n.isTextual() && StringUtils.hasText(n.asText())) {
+                return n.asText();
+            }
+        }
+
+        return "";
+    }
+
+    private static String extractFinishReason(JsonNode root) {
+        JsonNode choices = root == null ? null : root.path("choices");
+        if (choices != null && choices.isArray() && !choices.isEmpty()) {
+            return choices.get(0).path("finish_reason").asText("");
+        }
+        JsonNode doneReason = root == null ? null : root.path("done_reason");
+        if (doneReason != null && doneReason.isTextual()) {
+            return doneReason.asText("");
+        }
+        return "";
+    }
+
+    private static String snippet(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() > 600 ? text.substring(0, 600) + "..." : text;
     }
 
     private static String extractContent(JsonNode choiceNode) {

@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.coalblend.common.exception.BusinessException;
+import com.coalblend.common.config.CoalBlendProperties;
 import com.coalblend.dto.BlendGenerateDTO;
 import com.coalblend.dto.BlendPlanExecuteDTO;
 import com.coalblend.entity.BlendPlan;
@@ -25,8 +26,12 @@ import com.coalblend.mapper.ProductBatchMapper;
 import com.coalblend.service.BlendPlanService;
 import com.coalblend.service.chain.BatchLineageService;
 import com.coalblend.service.chain.BatchNoGenerator;
+import com.coalblend.service.intelligent.AiBlendCandidateService;
 import com.coalblend.service.intelligent.ModelInferenceService;
 import com.coalblend.service.intelligent.PlanScoreService;
+import com.coalblend.service.intelligent.model.AiBlendCandidateItem;
+import com.coalblend.service.intelligent.model.AiBlendCandidatePlan;
+import com.coalblend.service.intelligent.model.AiBlendCandidateResult;
 import com.coalblend.service.intelligent.model.ConstraintResult;
 import com.coalblend.service.intelligent.model.EvaluatedPlanDraft;
 import com.coalblend.service.intelligent.model.PlanCoalSnapshot;
@@ -39,6 +44,7 @@ import com.coalblend.service.rag.RagTraceService;
 import com.coalblend.vo.AiExplainResultVO;
 import com.coalblend.vo.blend.BlendPlanExecuteResultVO;
 import com.coalblend.vo.blend.BlendGenerateResultVO;
+import com.coalblend.vo.blend.CandidateEvaluationItemVO;
 import com.coalblend.vo.knowledge.MatchedCaseVO;
 import com.coalblend.vo.knowledge.MatchedRuleVO;
 import com.coalblend.vo.blend.PlanDetailVO;
@@ -55,9 +61,11 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -68,6 +76,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private static final BigDecimal RATIO_STEP = new BigDecimal("0.10");
     private static final int MAX_SHORTLIST_COALS = 5;
     private static final int MAX_RETURN_PLANS = 4;
+    private static final int MAX_EVALUATED_CANDIDATES_RETURN = 30;
 
     private final BlendPlanMapper blendPlanMapper;
     private final BlendPlanDetailMapper blendPlanDetailMapper;
@@ -79,12 +88,14 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private final RuleMatchService ruleMatchService;
     private final CaseMatchService caseMatchService;
     private final KnowledgeAssembleService knowledgeAssembleService;
+    private final AiBlendCandidateService aiBlendCandidateService;
     private final ModelInferenceService modelInferenceService;
     private final PlanScoreService planScoreService;
     private final RagRetrieveService ragRetrieveService;
     private final RagTraceService ragTraceService;
     private final BatchNoGenerator batchNoGenerator;
     private final BatchLineageService batchLineageService;
+    private final CoalBlendProperties coalBlendProperties;
 
     @Override
     public IPage<BlendPlan> page(long current, long size, Long orderId, String planStatus, String planCode,
@@ -282,8 +293,15 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 .collect(Collectors.toList());
         List<MatchedRuleVO> matchedRules = ruleMatchService.match(order, shortlistedCoalIds, bestInv);
         List<MatchedCaseVO> matchedCases = caseMatchService.match(order, shortlistedCoalIds, matchedRules);
+        RagRetrieveResultVO ragRetrieveResult = ragRetrieveService.retrieveByOrder(order, 5);
 
-        List<EvaluatedPlanDraft> drafts = buildCandidateDrafts(order, shortlisted);
+        AiBlendCandidateResult aiCandidateResult = aiBlendCandidateService.generateCandidates(
+                order, shortlisted, matchedRules, matchedCases, ragRetrieveResult, candidateScope);
+        List<EvaluatedPlanDraft> aiDrafts = buildAiCandidateDrafts(order, shortlisted, aiCandidateResult);
+        List<EvaluatedPlanDraft> systemDrafts = coalBlendProperties.isEnableSystemEnumeration()
+                ? buildCandidateDrafts(order, shortlisted)
+                : List.of();
+        List<EvaluatedPlanDraft> drafts = mergeAndRankDrafts(aiDrafts, systemDrafts);
         List<EvaluatedPlanDraft> preferred = drafts.stream()
                 .filter(d -> d.getConstraintResult().isFeasible())
                 .limit(MAX_RETURN_PLANS)
@@ -309,16 +327,24 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         vo.setConstraints(constraints);
         constraints.put("shortlistedCoalCount", shortlisted.size());
         constraints.put("generatedPlanCount", persistedPlans.size());
+        constraints.put("systemEnumerationEnabled", coalBlendProperties.isEnableSystemEnumeration());
+        constraints.put("aiCandidatePlanCount", aiCandidateResult.getPlans().size());
+        constraints.put("acceptedAiCandidateCount", aiDrafts.size());
+        if (StringUtils.hasText(aiCandidateResult.getErrorMessage())) {
+            constraints.put("aiCandidateError", aiCandidateResult.getErrorMessage());
+        }
         constraints.put("feasiblePlanCount", drafts.stream().filter(d -> d.getConstraintResult().isFeasible()).count());
         PlanWithDetailsVO recommended = toVo(best.planId, typeMap);
         vo.setRecommendedPlan(recommended);
         vo.setCandidatePlans(others.stream().map(p -> toVo(p.planId, typeMap)).collect(Collectors.toList()));
+        vo.setAiEvaluatedCandidates(toCandidateEvaluationVos(aiDrafts, typeMap));
+        vo.setSystemEvaluatedCandidates(toCandidateEvaluationVos(systemDrafts, typeMap));
         vo.setMatchedRules(matchedRules);
         vo.setMatchedCases(matchedCases);
+        vo.setAiCandidateResult(aiCandidateResult);
         KnowledgeContextDTO knowledgeContext = knowledgeAssembleService.assemble(
                 order, constraints, typeMap, bestInv, shortlistedCoalIds, matchedRules, matchedCases,
                 recommended, order.getDemandQuantity());
-        RagRetrieveResultVO ragRetrieveResult = ragRetrieveService.retrieveByOrder(order, 5);
         knowledgeContext.setRagRetrieveResult(ragRetrieveResult);
         String chainContext = buildPlanChainContext(best.planId);
         knowledgeContext.setRagKnowledgeText(ragRetrieveService.buildKnowledgeText(ragRetrieveResult)
@@ -591,6 +617,157 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         return total.divide(ratioTotal, 2, RoundingMode.HALF_UP);
     }
 
+    private List<EvaluatedPlanDraft> buildAiCandidateDrafts(Orders order, List<PlanCoalSnapshot> shortlisted,
+                                                            AiBlendCandidateResult aiResult) {
+        if (aiResult == null || aiResult.getPlans() == null || aiResult.getPlans().isEmpty()) {
+            return List.of();
+        }
+        List<EvaluatedPlanDraft> drafts = new ArrayList<>();
+        for (AiBlendCandidatePlan aiPlan : aiResult.getPlans()) {
+            AiDraftInput input = toAiDraftInput(shortlisted, aiPlan);
+            if (input.snapshots().size() < 2 || input.ratios().size() != input.snapshots().size()) {
+                continue;
+            }
+            EvaluatedPlanDraft draft = planScoreService.evaluate(order, input.snapshots(), input.ratios());
+            draft.setCandidateSource("ai");
+            draft.setAiCandidateReason(buildAiCandidateReason(aiPlan));
+            drafts.add(draft);
+        }
+        return drafts.stream()
+                .sorted(Comparator
+                        .comparing((EvaluatedPlanDraft d) -> d.getConstraintResult().isFeasible(), Comparator.reverseOrder())
+                        .thenComparing(d -> d.getScoreDetail().getOverallScore(), Comparator.reverseOrder())
+                        .thenComparing(EvaluatedPlanDraft::getTotalCost))
+                .limit(MAX_RETURN_PLANS)
+                .collect(Collectors.toList());
+    }
+
+    private AiDraftInput toAiDraftInput(List<PlanCoalSnapshot> shortlisted, AiBlendCandidatePlan aiPlan) {
+        if (aiPlan == null || aiPlan.getItems() == null || aiPlan.getItems().size() < 2 || aiPlan.getItems().size() > 4) {
+            return new AiDraftInput(List.of(), List.of());
+        }
+        List<PlanCoalSnapshot> snapshots = new ArrayList<>();
+        List<BigDecimal> ratios = new ArrayList<>();
+        Set<String> usedMaterialKeys = new HashSet<>();
+        Set<Long> usedCoalIds = new HashSet<>();
+        BigDecimal sum = BigDecimal.ZERO;
+        for (AiBlendCandidateItem item : aiPlan.getItems()) {
+            if (item == null || item.getRatio() == null || item.getRatio().compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            PlanCoalSnapshot snapshot = matchAiItem(shortlisted, item);
+            if (snapshot == null || snapshot.getCoalId() == null) {
+                continue;
+            }
+            String materialKey = StringUtils.hasText(snapshot.getProductBatchNo())
+                    ? "PB:" + snapshot.getProductBatchNo()
+                    : "COAL:" + snapshot.getCoalId();
+            if (usedMaterialKeys.contains(materialKey) || usedCoalIds.contains(snapshot.getCoalId())) {
+                continue;
+            }
+            usedMaterialKeys.add(materialKey);
+            usedCoalIds.add(snapshot.getCoalId());
+            snapshots.add(snapshot);
+            ratios.add(item.getRatio());
+            sum = sum.add(item.getRatio());
+        }
+        if (snapshots.size() < 2 || sum.compareTo(new BigDecimal("0.95")) < 0 || sum.compareTo(new BigDecimal("1.05")) > 0) {
+            return new AiDraftInput(List.of(), List.of());
+        }
+        BigDecimal ratioSum = sum;
+        List<BigDecimal> normalized = ratios.stream()
+                .map(r -> r.divide(ratioSum, 4, RoundingMode.HALF_UP))
+                .collect(Collectors.toCollection(ArrayList::new));
+        BigDecimal normalizedSum = normalized.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (!normalized.isEmpty()) {
+            int last = normalized.size() - 1;
+            normalized.set(last, normalized.get(last).add(BigDecimal.ONE.subtract(normalizedSum)).setScale(4, RoundingMode.HALF_UP));
+        }
+        return new AiDraftInput(snapshots, normalized);
+    }
+
+    private PlanCoalSnapshot matchAiItem(List<PlanCoalSnapshot> shortlisted, AiBlendCandidateItem item) {
+        if (StringUtils.hasText(item.getProductBatchNo())) {
+            for (PlanCoalSnapshot s : shortlisted) {
+                if (item.getProductBatchNo().equals(s.getProductBatchNo())) {
+                    return s;
+                }
+            }
+        }
+        if (item.getCoalId() != null) {
+            for (PlanCoalSnapshot s : shortlisted) {
+                if (item.getCoalId().equals(s.getCoalId())) {
+                    return s;
+                }
+            }
+        }
+        return null;
+    }
+
+    private String buildAiCandidateReason(AiBlendCandidatePlan aiPlan) {
+        StringBuilder sb = new StringBuilder();
+        if (StringUtils.hasText(aiPlan.getPlanName())) {
+            sb.append("AI方案名称：").append(aiPlan.getPlanName());
+        }
+        if (StringUtils.hasText(aiPlan.getStrategy())) {
+            if (!sb.isEmpty()) {
+                sb.append("；");
+            }
+            sb.append("策略：").append(aiPlan.getStrategy());
+        }
+        if (aiPlan.getItems() != null && !aiPlan.getItems().isEmpty()) {
+            String itemReasons = aiPlan.getItems().stream()
+                    .filter(i -> StringUtils.hasText(i.getReason()))
+                    .map(i -> (StringUtils.hasText(i.getProductBatchNo()) ? i.getProductBatchNo() : String.valueOf(i.getCoalId()))
+                            + "：" + i.getReason())
+                    .collect(Collectors.joining("；"));
+            if (StringUtils.hasText(itemReasons)) {
+                if (!sb.isEmpty()) {
+                    sb.append("；");
+                }
+                sb.append("物料理由：").append(itemReasons);
+            }
+        }
+        if (StringUtils.hasText(aiPlan.getRisk())) {
+            if (!sb.isEmpty()) {
+                sb.append("；");
+            }
+            sb.append("AI风险提示：").append(aiPlan.getRisk());
+        }
+        return sb.toString();
+    }
+
+    private List<EvaluatedPlanDraft> mergeAndRankDrafts(List<EvaluatedPlanDraft> aiDrafts,
+                                                        List<EvaluatedPlanDraft> systemDrafts) {
+        Map<String, EvaluatedPlanDraft> merged = new LinkedHashMap<>();
+        for (EvaluatedPlanDraft d : aiDrafts) {
+            merged.put(draftSignature(d), d);
+        }
+        for (EvaluatedPlanDraft d : systemDrafts) {
+            merged.putIfAbsent(draftSignature(d), d);
+        }
+        List<EvaluatedPlanDraft> drafts = new ArrayList<>(merged.values());
+        drafts.sort(Comparator
+                .comparing((EvaluatedPlanDraft d) -> d.getConstraintResult().isFeasible(), Comparator.reverseOrder())
+                .thenComparing(d -> d.getScoreDetail().getOverallScore(), Comparator.reverseOrder())
+                .thenComparing(EvaluatedPlanDraft::getTotalCost));
+        return drafts;
+    }
+
+    private String draftSignature(EvaluatedPlanDraft draft) {
+        if (draft == null || draft.getDetails() == null) {
+            return "";
+        }
+        return draft.getDetails().stream()
+                .map(d -> {
+                    String material = StringUtils.hasText(d.getProductBatchNo()) ? d.getProductBatchNo() : String.valueOf(d.getCoalId());
+                    BigDecimal pct = d.getBlendRatio() == null ? BigDecimal.ZERO : d.getBlendRatio().setScale(2, RoundingMode.HALF_UP);
+                    return material + ":" + pct.toPlainString();
+                })
+                .sorted()
+                .collect(Collectors.joining("|"));
+    }
+
     private List<EvaluatedPlanDraft> buildCandidateDrafts(Orders order, List<PlanCoalSnapshot> shortlisted) {
         List<List<PlanCoalSnapshot>> combinations = buildCombinations(shortlisted);
         List<EvaluatedPlanDraft> drafts = new ArrayList<>();
@@ -604,6 +781,9 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 .thenComparing(d -> d.getScoreDetail().getOverallScore(), Comparator.reverseOrder())
                 .thenComparing(EvaluatedPlanDraft::getTotalCost));
         return drafts;
+    }
+
+    private record AiDraftInput(List<PlanCoalSnapshot> snapshots, List<BigDecimal> ratios) {
     }
 
     private List<List<PlanCoalSnapshot>> buildCombinations(List<PlanCoalSnapshot> shortlisted) {
@@ -673,6 +853,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             plan.setConstraintSummary(buildConstraintSummary(constraint));
             plan.setScoreDetail(buildScoreDetailSummary(score));
             plan.setRiskLevel(constraint.riskLevel());
+            plan.setCandidateSource(StringUtils.hasText(draft.getCandidateSource()) ? draft.getCandidateSource() : "system");
+            plan.setAiCandidateReason(draft.getAiCandidateReason());
             plan.setCreateBy(createBy);
             blendPlanMapper.insert(plan);
             for (BlendPlanDetail d : draft.getDetails()) {
@@ -701,6 +883,57 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 + "；成本评分：" + fmt(s.getCostScore()) + "（" + s.getCostReason() + "）"
                 + "；稳定性评分：" + fmt(s.getStabilityScore()) + "（" + s.getStabilityReason() + "）"
                 + "；综合评分：" + fmt(s.getOverallScore()) + "（" + s.getOverallReason() + "）";
+    }
+
+    private List<CandidateEvaluationItemVO> toCandidateEvaluationVos(List<EvaluatedPlanDraft> drafts,
+                                                                     Map<Long, CoalType> typeMap) {
+        if (drafts == null || drafts.isEmpty()) {
+            return List.of();
+        }
+        return drafts.stream()
+                .limit(MAX_EVALUATED_CANDIDATES_RETURN)
+                .map(d -> toCandidateEvaluationVo(d, typeMap))
+                .collect(Collectors.toList());
+    }
+
+    private CandidateEvaluationItemVO toCandidateEvaluationVo(EvaluatedPlanDraft draft, Map<Long, CoalType> typeMap) {
+        ConstraintResult constraint = draft.getConstraintResult();
+        ScoreDetail score = draft.getScoreDetail();
+        CandidateEvaluationItemVO vo = new CandidateEvaluationItemVO();
+        vo.setCandidateSource(StringUtils.hasText(draft.getCandidateSource()) ? draft.getCandidateSource() : "system");
+        vo.setPlanName("ai".equals(vo.getCandidateSource()) ? "AI候选方案" : "系统枚举方案");
+        vo.setAiCandidateReason(draft.getAiCandidateReason());
+        vo.setTotalCost(draft.getTotalCost());
+        vo.setQualityScore(score.getQualityScore());
+        vo.setCostScore(score.getCostScore());
+        vo.setStabilityScore(score.getStabilityScore());
+        vo.setOverallScore(score.getOverallScore());
+        vo.setFeasibleFlag(constraint.isFeasible() ? 1 : 0);
+        vo.setConstraintSummary(buildConstraintSummary(constraint));
+        vo.setScoreDetail(buildScoreDetailSummary(score));
+        vo.setRiskLevel(constraint.riskLevel());
+        vo.setRiskTip(draft.getRiskTip());
+        vo.setDetails(draft.getDetails().stream().map(d -> {
+            PlanDetailVO row = new PlanDetailVO();
+            row.setCoalId(d.getCoalId());
+            row.setProductBatchId(d.getProductBatchId());
+            row.setProductBatchNo(d.getProductBatchNo());
+            row.setInventoryId(d.getInventoryId());
+            row.setQualitySnapshotJson(d.getQualitySnapshotJson());
+            CoalType t = typeMap.get(d.getCoalId());
+            row.setCoalName(t == null ? null : t.getCoalName());
+            row.setBlendRatio(d.getBlendRatio());
+            row.setUseQuantity(d.getUseQuantity());
+            row.setPredictedAsh(d.getPredictedAsh());
+            row.setPredictedSulfur(d.getPredictedSulfur());
+            row.setPredictedMoisture(d.getPredictedMoisture());
+            row.setPredictedVolatile(d.getPredictedVolatile());
+            row.setPredictedCalorific(d.getPredictedCalorific());
+            row.setUnitCost(d.getUnitCost());
+            row.setRemark(d.getRemark());
+            return row;
+        }).collect(Collectors.toList()));
+        return vo;
     }
 
     private String fmt(BigDecimal value) {
