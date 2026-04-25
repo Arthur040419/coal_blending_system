@@ -73,7 +73,9 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
         ModelConfig cfg = loadActiveModelConfig();
         if (!coalLlmProperties.isEnabled() || cfg == null || !StringUtils.hasText(cfg.getApiUrl())) {
             log.info("Skip LLM call (enabled={}, configPresent={})", coalLlmProperties.isEnabled(), cfg != null);
-            return persistFallback(recommendedPlanId, cfg, "未启用大模型或未配置有效 model_config");
+            AiExplainResultVO fallback = persistFallback(recommendedPlanId, cfg, "未启用大模型或未配置有效 model_config");
+            fallback.setPromptText(prompt);
+            return fallback;
         }
 
         try {
@@ -81,18 +83,28 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
             AiExplainResponseVO parsed = parseModelOutput(raw);
             if (!StringUtils.hasText(parsed.getExplanation())
                     && !StringUtils.hasText(parsed.getRuleBasis())
+                    && !StringUtils.hasText(parsed.getCaseReference())
+                    && !StringUtils.hasText(parsed.getRecommendReason())
                     && !StringUtils.hasText(parsed.getRiskTip())
                     && !StringUtils.hasText(parsed.getOptimizeSuggestion())) {
                 log.warn("LLM returned empty sections, use fallback");
-                return persistFallback(recommendedPlanId, cfg, "模型输出为空");
+                AiExplainResultVO fallback = persistFallback(recommendedPlanId, cfg, "模型输出为空");
+                fallback.setPromptText(prompt);
+                return fallback;
             }
-            return persistAiResult(recommendedPlanId, cfg.getModelName(), parsed, raw);
+            AiExplainResultVO result = persistAiResult(recommendedPlanId, cfg.getModelName(), parsed, raw);
+            result.setPromptText(prompt);
+            return result;
         } catch (RestClientException e) {
             log.warn("LLM HTTP error: {}", e.getMessage());
-            return persistFallback(recommendedPlanId, cfg, "HTTP: " + e.getMessage());
+            AiExplainResultVO fallback = persistFallback(recommendedPlanId, cfg, "HTTP: " + e.getMessage());
+            fallback.setPromptText(prompt);
+            return fallback;
         } catch (Exception e) {
             log.warn("LLM invoke failed", e);
-            return persistFallback(recommendedPlanId, cfg, e.getClass().getSimpleName());
+            AiExplainResultVO fallback = persistFallback(recommendedPlanId, cfg, e.getClass().getSimpleName());
+            fallback.setPromptText(prompt);
+            return fallback;
         }
     }
 
@@ -225,16 +237,22 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
         return "";
     }
 
-    /**
-     * 解析模型输出。若标题为「1. 方案说明：」行式结构，原 indexOf 段切分会把行首的「2. 」等并入前一段，导致前段只显示编号。
-     * 此处按行首小标题 + 冒号 定位各段正文的起止位置。
-     */
     AiExplainResponseVO parseModelOutput(String text) {
         AiExplainResponseVO vo = new AiExplainResponseVO();
         vo.setRawText(text);
         if (!StringUtils.hasText(text)) {
             return vo;
         }
+
+        AiExplainResponseVO json = parseJsonModelOutput(text);
+        if (StringUtils.hasText(json.getExplanation())
+                || StringUtils.hasText(json.getRuleBasis())
+                || StringUtils.hasText(json.getCaseReference())
+                || StringUtils.hasText(json.getRecommendReason())
+                || StringUtils.hasText(json.getRiskTip())) {
+            return json;
+        }
+
         if (text.contains("规则依据")) {
             String explanation = extractBySectionLabel(text, "方案说明", "规则依据");
             String ruleBasis = extractBySectionLabel(text, "规则依据", "风险提示");
@@ -266,6 +284,61 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
         vo.setRiskTip(trimSection(risk));
         vo.setOptimizeSuggestion(trimSection(opt));
         return vo;
+    }
+
+    private AiExplainResponseVO parseJsonModelOutput(String text) {
+        AiExplainResponseVO vo = new AiExplainResponseVO();
+        vo.setRawText(text);
+        String jsonText = extractJsonObject(text);
+        if (!StringUtils.hasText(jsonText)) {
+            return vo;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(jsonText);
+            vo.setRuleBasis(readText(root, "ruleBasis"));
+            vo.setCaseReference(readText(root, "caseReference"));
+            vo.setRecommendReason(readText(root, "recommendReason"));
+            vo.setRiskTip(readText(root, "riskTip"));
+            String finalExplanation = readText(root, "finalExplanation");
+            if (!StringUtils.hasText(finalExplanation)) {
+                finalExplanation = readText(root, "explanation");
+            }
+            vo.setExplanation(finalExplanation);
+            vo.setOptimizeSuggestion(readText(root, "optimizeSuggestion"));
+        } catch (Exception e) {
+            log.warn("LLM output is not valid JSON, fallback to section parser: {}", e.getMessage());
+            vo.setExplanation(text.trim());
+            vo.setRiskTip("模型输出格式不规范，已保留原始解释内容。");
+        }
+        return vo;
+    }
+
+    private static String readText(JsonNode root, String field) {
+        JsonNode n = root == null ? null : root.path(field);
+        if (n == null || n.isMissingNode() || n.isNull()) {
+            return "";
+        }
+        if (n.isTextual()) {
+            return n.asText().trim();
+        }
+        return n.toString();
+    }
+
+    private static String extractJsonObject(String text) {
+        if (!StringUtils.hasText(text)) {
+            return "";
+        }
+        String s = text.trim();
+        if (s.startsWith("```")) {
+            s = s.replaceFirst("^```(?:json)?\\s*", "");
+            s = s.replaceFirst("\\s*```$", "");
+        }
+        int start = s.indexOf('{');
+        int end = s.lastIndexOf('}');
+        if (start < 0 || end <= start) {
+            return "";
+        }
+        return s.substring(start, end + 1);
     }
 
     /**
@@ -347,6 +420,9 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
                 .eq(BlendPlan::getId, planId)
                 .set(BlendPlan::getExplanation, parsed.getExplanation())
                 .set(BlendPlan::getRuleBasis, nullToEmpty(parsed.getRuleBasis()))
+                .set(BlendPlan::getCaseReference, nullToEmpty(parsed.getCaseReference()))
+                .set(BlendPlan::getRecommendReason, nullToEmpty(parsed.getRecommendReason()))
+                .set(BlendPlan::getFinalExplanation, nullToEmpty(parsed.getExplanation()))
                 .set(BlendPlan::getRiskTip, nullToEmpty(parsed.getRiskTip()))
                 .set(BlendPlan::getOptimizeSuggestion, nullToEmpty(parsed.getOptimizeSuggestion()))
                 .set(BlendPlan::getAiModelName, modelName)
@@ -354,6 +430,8 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
         AiExplainResultVO out = new AiExplainResultVO();
         out.setExplanation(parsed.getExplanation());
         out.setRuleBasis(parsed.getRuleBasis());
+        out.setCaseReference(parsed.getCaseReference());
+        out.setRecommendReason(parsed.getRecommendReason());
         out.setRiskTip(parsed.getRiskTip());
         out.setOptimizeSuggestion(parsed.getOptimizeSuggestion());
         out.setAiGenerated(true);
@@ -369,6 +447,9 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
                 .eq(BlendPlan::getId, planId)
                 .set(BlendPlan::getExplanation, coalLlmProperties.getFallbackExplanation())
                 .set(BlendPlan::getRuleBasis, coalLlmProperties.getFallbackRuleBasis())
+                .set(BlendPlan::getCaseReference, "当前知识库依据不足，未生成有效案例参考。")
+                .set(BlendPlan::getRecommendReason, coalLlmProperties.getFallbackExplanation())
+                .set(BlendPlan::getFinalExplanation, coalLlmProperties.getFallbackExplanation())
                 .set(BlendPlan::getRiskTip, coalLlmProperties.getFallbackRiskTip())
                 .set(BlendPlan::getOptimizeSuggestion, coalLlmProperties.getFallbackOptimizeSuggestion())
                 .set(BlendPlan::getAiModelName, modelTag + "(兜底)")
@@ -376,6 +457,8 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
         AiExplainResultVO out = new AiExplainResultVO();
         out.setExplanation(coalLlmProperties.getFallbackExplanation());
         out.setRuleBasis(coalLlmProperties.getFallbackRuleBasis());
+        out.setCaseReference("当前知识库依据不足，未生成有效案例参考。");
+        out.setRecommendReason(coalLlmProperties.getFallbackExplanation());
         out.setRiskTip(coalLlmProperties.getFallbackRiskTip());
         out.setOptimizeSuggestion(coalLlmProperties.getFallbackOptimizeSuggestion());
         out.setAiGenerated(false);

@@ -5,6 +5,8 @@ import com.coalblend.entity.Orders;
 import com.coalblend.vo.knowledge.KnowledgeSummaryVO;
 import com.coalblend.vo.knowledge.MatchedCaseVO;
 import com.coalblend.vo.knowledge.MatchedRuleVO;
+import com.coalblend.vo.AiExplainResultVO;
+import com.coalblend.vo.rag.RagRetrieveResultVO;
 import lombok.Data;
 
 import java.util.LinkedHashMap;
@@ -26,5 +28,9 @@ public class BlendGenerateResultVO {
     private KnowledgeSummaryVO knowledgeSummary;
     /** 完整知识上下文（含可拼 Prompt 的文本字段） */
     private KnowledgeContextDTO knowledgeContext;
+    /** RAG 统一知识库检索结果 */
+    private RagRetrieveResultVO ragRetrieveResult;
+    /** 大模型基于 RAG 上下文生成的解释结果 */
+    private AiExplainResultVO ragExplanation;
     private String explainSummary;
 }

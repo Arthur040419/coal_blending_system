@@ -29,12 +29,15 @@ import com.coalblend.service.intelligent.model.ScoreDetail;
 import com.coalblend.service.knowledge.CaseMatchService;
 import com.coalblend.service.knowledge.KnowledgeAssembleService;
 import com.coalblend.service.knowledge.RuleMatchService;
+import com.coalblend.service.rag.RagRetrieveService;
+import com.coalblend.service.rag.RagTraceService;
 import com.coalblend.vo.AiExplainResultVO;
 import com.coalblend.vo.blend.BlendGenerateResultVO;
 import com.coalblend.vo.knowledge.MatchedCaseVO;
 import com.coalblend.vo.knowledge.MatchedRuleVO;
 import com.coalblend.vo.blend.PlanDetailVO;
 import com.coalblend.vo.blend.PlanWithDetailsVO;
+import com.coalblend.vo.rag.RagRetrieveResultVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -70,6 +73,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private final KnowledgeAssembleService knowledgeAssembleService;
     private final ModelInferenceService modelInferenceService;
     private final PlanScoreService planScoreService;
+    private final RagRetrieveService ragRetrieveService;
+    private final RagTraceService ragTraceService;
 
     @Override
     public IPage<BlendPlan> page(long current, long size, Long orderId, String planStatus, String planCode,
@@ -244,12 +249,18 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         KnowledgeContextDTO knowledgeContext = knowledgeAssembleService.assemble(
                 order, constraints, typeMap, bestInv, shortlistedCoalIds, matchedRules, matchedCases,
                 recommended, order.getDemandQuantity());
+        RagRetrieveResultVO ragRetrieveResult = ragRetrieveService.retrieveByOrder(order, 5);
+        knowledgeContext.setRagRetrieveResult(ragRetrieveResult);
+        knowledgeContext.setRagKnowledgeText(ragRetrieveService.buildKnowledgeText(ragRetrieveResult));
         vo.setKnowledgeContext(knowledgeContext);
         vo.setKnowledgeSummary(knowledgeAssembleService.summarize(knowledgeContext));
+        vo.setRagRetrieveResult(ragRetrieveResult);
 
         AiExplainResultVO ai = modelInferenceService.enrichRecommendedPlan(
                 best.planId, order, recommended, matchedRules, matchedCases, knowledgeContext);
+        ragTraceService.saveBlendGenerateTrace(best.planId, ragRetrieveResult, ai);
         vo.setRecommendedPlan(toVo(best.planId, typeMap));
+        vo.setRagExplanation(ai);
         vo.setExplainSummary(buildAiSummaryLine(ai));
         return vo;
     }
@@ -265,17 +276,28 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         String model = StringUtils.hasText(air.getModelNameUsed()) ? ("（" + air.getModelNameUsed() + "）") : "";
         String ex = air.getExplanation() == null ? "" : air.getExplanation().trim();
         String rb = air.getRuleBasis() == null ? "" : air.getRuleBasis().trim();
+        String cr = air.getCaseReference() == null ? "" : air.getCaseReference().trim();
+        String rr = air.getRecommendReason() == null ? "" : air.getRecommendReason().trim();
         String risk = air.getRiskTip() == null ? "" : air.getRiskTip().trim();
         String opt = air.getOptimizeSuggestion() == null ? "" : air.getOptimizeSuggestion().trim();
         StringBuilder body = new StringBuilder();
-        if (StringUtils.hasText(ex)) {
-            body.append("【方案说明】\n").append(ex);
-        }
         if (StringUtils.hasText(rb)) {
             if (!body.isEmpty()) {
                 body.append("\n\n");
             }
             body.append("【规则依据】\n").append(rb);
+        }
+        if (StringUtils.hasText(cr)) {
+            if (!body.isEmpty()) {
+                body.append("\n\n");
+            }
+            body.append("【案例参考】\n").append(cr);
+        }
+        if (StringUtils.hasText(rr)) {
+            if (!body.isEmpty()) {
+                body.append("\n\n");
+            }
+            body.append("【推荐理由】\n").append(rr);
         }
         if (StringUtils.hasText(risk)) {
             if (!body.isEmpty()) {
@@ -288,6 +310,12 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 body.append("\n\n");
             }
             body.append("【优化建议】\n").append(opt);
+        }
+        if (StringUtils.hasText(ex)) {
+            if (!body.isEmpty()) {
+                body.append("\n\n");
+            }
+            body.append("【最终解释】\n").append(ex);
         }
         if (body.isEmpty()) {
             body.append("方案已生成。");

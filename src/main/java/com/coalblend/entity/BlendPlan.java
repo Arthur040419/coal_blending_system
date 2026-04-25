@@ -34,6 +34,12 @@ public class BlendPlan {
     private String explanation;
     /** 知识增强：模型输出的规则/命中依据说明 */
     private String ruleBasis;
+    /** RAG JSON输出：案例参考 */
+    private String caseReference;
+    /** RAG JSON输出：推荐理由 */
+    private String recommendReason;
+    /** RAG JSON输出：最终解释 */
+    private String finalExplanation;
     private String riskTip;
     /** AI 优化建议 */
     private String optimizeSuggestion;

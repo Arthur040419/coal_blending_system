@@ -69,9 +69,18 @@ public class PromptBuildServiceImpl implements PromptBuildService {
         String rulesT = nzBlock(formatRules(ctx.getMatchedRules()));
         String casesT = nzBlock(formatCases(ctx.getMatchedCases()));
         String invT = nzBlock(ctx.getInventoryText());
+        String ragT = nzBlock(ctx.getRagKnowledgeText());
 
         return """
-                你是煤矿智能配煤领域专家，请根据以下订单信息、推荐方案、命中规则、参考案例和库存信息，生成专业解释。
+                你是煤矿智能配煤系统中的方案解释助手。
+                你的任务是根据订单信息、推荐方案、命中的规则知识、历史案例和 RAG 知识库内容，生成可解释的方案说明。
+
+                请严格遵守以下要求：
+                1. 只能依据给定的订单、方案和知识库内容进行解释；
+                2. 不要编造未提供的煤种、规则、案例或检测数据；
+                3. 不要直接修改配煤比例；
+                4. 如果知识不足，请在对应字段中说明“当前知识库依据不足”；
+                5. 输出内容应面向煤矿业务人员，语言清晰、简洁、专业。
 
                 【订单信息】
                 %s
@@ -85,22 +94,21 @@ public class PromptBuildServiceImpl implements PromptBuildService {
                 【参考案例】
                 %s
 
+                【RAG知识库检索结果】
+                %s
+
                 【库存信息】
                 %s
 
-                请按如下格式输出（必须保留序号与小标题，便于系统解析）：
-                1. 方案说明：
-                2. 规则依据：
-                3. 风险提示：
-                4. 优化建议：
-
-                要求：
-                - 使用正式、简洁、专业的中文；可使用 Markdown（如 **加粗**、列表），不要使用 HTML 标签；
-                - 内容必须围绕当前订单与推荐方案，结合命中规则与参考案例；
-                - 「规则依据」须明确写出与命中规则的对应关系，不要空泛；
-                - 「风险提示」须结合库存、成本与质量约束；
-                - 「优化建议」须可执行、可落地。
-                """.formatted(orderT, planT, rulesT, casesT, invT);
+                请严格输出 JSON，不要输出 Markdown，不要添加多余解释。JSON 必须只包含以下字段：
+                {
+                  "ruleBasis": "说明命中的规则依据，以及这些规则如何约束当前方案",
+                  "caseReference": "说明可参考的历史案例；如果案例不足，写当前知识库依据不足",
+                  "recommendReason": "说明推荐该方案的原因，结合质量、成本、库存和评分",
+                  "riskTip": "说明质量、库存、成本或执行风险",
+                  "finalExplanation": "面向业务人员的最终综合解释"
+                }
+                """.formatted(orderT, planT, rulesT, casesT, ragT, invT);
     }
 
     /** 无完整知识上下文时的降级 Prompt（保持三段式解析兼容）。 */

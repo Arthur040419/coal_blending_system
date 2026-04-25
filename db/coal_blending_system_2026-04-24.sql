@@ -40,6 +40,9 @@ CREATE TABLE `blend_plan` (
   `plan_status` varchar(20) DEFAULT 'generated' COMMENT '方案状态：generated/selected/executed',
   `explanation` text COMMENT '方案解释',
   `rule_basis` text COMMENT 'AI生成的规则依据（知识增强）',
+  `case_reference` text COMMENT 'RAG生成的案例参考',
+  `recommend_reason` text COMMENT 'RAG生成的推荐理由',
+  `final_explanation` text COMMENT 'RAG生成的最终解释',
   `risk_tip` text COMMENT '风险提示',
   `optimize_suggestion` text COMMENT 'AI优化建议',
   `ai_model_name` varchar(100) DEFAULT NULL COMMENT '解释所用模型名称',
@@ -264,6 +267,27 @@ CREATE TABLE `rag_knowledge` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_knowledge_code` (`knowledge_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='RAG统一知识检索表';
+
+
+
+# 转储表 rag_retrieval_log
+# ------------------------------------------------------------
+
+CREATE TABLE `rag_retrieval_log` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `biz_type` varchar(50) NOT NULL COMMENT '业务类型：blend_generate/chat/search',
+  `biz_id` bigint DEFAULT NULL COMMENT '业务ID，如方案ID',
+  `query_text` varchar(1000) NOT NULL COMMENT '检索查询文本',
+  `keywords` varchar(1000) DEFAULT NULL COMMENT '抽取出的关键词',
+  `retrieved_ids` varchar(1000) DEFAULT NULL COMMENT '命中的知识ID列表',
+  `model_name` varchar(100) DEFAULT NULL COMMENT '调用模型名称',
+  `prompt_text` mediumtext COMMENT '最终提示词',
+  `model_output` mediumtext COMMENT '模型输出',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_rag_log_biz` (`biz_type`, `biz_id`),
+  KEY `idx_rag_log_create_time` (`create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='RAG检索与生成日志表';
 
 
 

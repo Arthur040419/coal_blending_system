@@ -2,6 +2,7 @@ package com.coalblend.dto.knowledge;
 
 import com.coalblend.vo.knowledge.MatchedCaseVO;
 import com.coalblend.vo.knowledge.MatchedRuleVO;
+import com.coalblend.vo.rag.RagRetrieveResultVO;
 import lombok.Data;
 
 import java.math.BigDecimal;
@@ -31,6 +32,10 @@ public class KnowledgeContextDTO {
     private String inventoryText;
     private String rulesText;
     private String casesText;
+    /** RAG统一知识库检索结果（规则/案例/术语/文档） */
+    private RagRetrieveResultVO ragRetrieveResult;
+    /** 已格式化的 RAG 知识块，直接进入 Prompt */
+    private String ragKnowledgeText;
 
     // --- 结构化订单关键字段（与论文设计一致，可选用于扩展/RAG）---
     private String orderCode;
