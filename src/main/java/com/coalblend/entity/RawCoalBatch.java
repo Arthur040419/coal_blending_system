@@ -6,23 +6,25 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("inventory")
-public class Inventory {
-
+@TableName("raw_coal_batch")
+public class RawCoalBatch {
     @TableId(type = IdType.AUTO)
     private Long id;
-    private Long coalId;
-    private String warehouseCode;
-    private BigDecimal stockQuantity;
-    private BigDecimal availableQuantity;
-    private String materialStage;
     private String rawBatchNo;
-    private String productBatchNo;
-    private BigDecimal lockedQuantity;
-    private LocalDateTime updateTime;
-    private Integer status;
+    private Long sourceId;
+    private Long coalId;
+    private LocalDate productionDate;
+    private String shiftNo;
+    private BigDecimal outputQuantity;
+    private BigDecimal gangueRate;
+    private String destination;
+    private String warehouseCode;
+    private String status;
     private String remark;
+    private LocalDateTime createTime;
+    private LocalDateTime updateTime;
 }

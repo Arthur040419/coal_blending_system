@@ -9,15 +9,14 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("coal_quality")
-public class CoalQuality {
-
+@TableName("final_product_inspection")
+public class FinalProductInspection {
     @TableId(type = IdType.AUTO)
     private Long id;
-    private Long coalId;
-    private String batchNo;
-    private String sampleStage;
-    private String relatedBatchNo;
+    private String reportNo;
+    private Long productBatchId;
+    private Long orderId;
+    private Long planId;
     private LocalDateTime sampleTime;
     private String samplePoint;
     private BigDecimal ashContent;
@@ -25,10 +24,9 @@ public class CoalQuality {
     private BigDecimal moistureContent;
     private BigDecimal volatileContent;
     private BigDecimal calorificValue;
-    private BigDecimal fixedCarbon;
-    private String reportNo;
+    private Integer qualifiedFlag;
+    private String inspector;
     private String standardBasis;
-    private Integer status;
+    private String remark;
     private LocalDateTime createTime;
-    private LocalDateTime updateTime;
 }

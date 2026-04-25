@@ -111,6 +111,7 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
     private ModelConfig loadActiveModelConfig() {
         return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfig>()
                 .eq(ModelConfig::getStatus, 1)
+                .in(ModelConfig::getModelType, List.of("LLM", "LOCAL_OLLAMA"))
                 .isNotNull(ModelConfig::getApiUrl)
                 .ne(ModelConfig::getApiUrl, "")
                 .orderByDesc(ModelConfig::getId)

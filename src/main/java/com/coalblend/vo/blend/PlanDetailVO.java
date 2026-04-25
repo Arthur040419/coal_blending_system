@@ -11,6 +11,10 @@ public class PlanDetailVO {
     private Long planId;
     private Long coalId;
     private String coalName;
+    private Long productBatchId;
+    private String productBatchNo;
+    private Long inventoryId;
+    private String qualitySnapshotJson;
     private BigDecimal blendRatio;
     private BigDecimal useQuantity;
     private BigDecimal predictedAsh;

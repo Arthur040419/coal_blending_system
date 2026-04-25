@@ -2,8 +2,10 @@ package com.coalblend.service;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.coalblend.dto.BlendGenerateDTO;
+import com.coalblend.dto.BlendPlanExecuteDTO;
 import com.coalblend.entity.BlendPlan;
 import com.coalblend.entity.BlendPlanDetail;
+import com.coalblend.vo.blend.BlendPlanExecuteResultVO;
 import com.coalblend.vo.blend.BlendGenerateResultVO;
 
 import java.util.List;
@@ -20,6 +22,8 @@ public interface BlendPlanService {
     List<BlendPlan> listByOrder(Long orderId);
 
     void selectPlan(Long planId);
+
+    BlendPlanExecuteResultVO execute(BlendPlanExecuteDTO dto);
 
     BlendGenerateResultVO generate(BlendGenerateDTO dto);
 }

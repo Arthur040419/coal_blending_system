@@ -15,6 +15,9 @@ public class BlendPlanDetail {
     private Long id;
     private Long planId;
     private Long coalId;
+    private Long productBatchId;
+    private String productBatchNo;
+    private Long inventoryId;
     private BigDecimal blendRatio;
     private BigDecimal useQuantity;
     private BigDecimal predictedAsh;
@@ -23,5 +26,6 @@ public class BlendPlanDetail {
     private BigDecimal predictedVolatile;
     private BigDecimal predictedCalorific;
     private BigDecimal unitCost;
+    private String qualitySnapshotJson;
     private String remark;
 }

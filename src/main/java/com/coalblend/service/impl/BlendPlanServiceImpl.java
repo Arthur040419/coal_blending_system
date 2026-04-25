@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.coalblend.common.exception.BusinessException;
 import com.coalblend.dto.BlendGenerateDTO;
+import com.coalblend.dto.BlendPlanExecuteDTO;
 import com.coalblend.entity.BlendPlan;
 import com.coalblend.entity.BlendPlanDetail;
 import com.coalblend.dto.knowledge.KnowledgeContextDTO;
@@ -13,13 +14,17 @@ import com.coalblend.entity.CoalQuality;
 import com.coalblend.entity.CoalType;
 import com.coalblend.entity.Inventory;
 import com.coalblend.entity.Orders;
+import com.coalblend.entity.ProductBatch;
 import com.coalblend.mapper.BlendPlanDetailMapper;
 import com.coalblend.mapper.BlendPlanMapper;
 import com.coalblend.mapper.CoalQualityMapper;
 import com.coalblend.mapper.CoalTypeMapper;
 import com.coalblend.mapper.InventoryMapper;
 import com.coalblend.mapper.OrdersMapper;
+import com.coalblend.mapper.ProductBatchMapper;
 import com.coalblend.service.BlendPlanService;
+import com.coalblend.service.chain.BatchLineageService;
+import com.coalblend.service.chain.BatchNoGenerator;
 import com.coalblend.service.intelligent.ModelInferenceService;
 import com.coalblend.service.intelligent.PlanScoreService;
 import com.coalblend.service.intelligent.model.ConstraintResult;
@@ -32,6 +37,7 @@ import com.coalblend.service.knowledge.RuleMatchService;
 import com.coalblend.service.rag.RagRetrieveService;
 import com.coalblend.service.rag.RagTraceService;
 import com.coalblend.vo.AiExplainResultVO;
+import com.coalblend.vo.blend.BlendPlanExecuteResultVO;
 import com.coalblend.vo.blend.BlendGenerateResultVO;
 import com.coalblend.vo.knowledge.MatchedCaseVO;
 import com.coalblend.vo.knowledge.MatchedRuleVO;
@@ -52,6 +58,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Service
@@ -68,6 +75,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private final InventoryMapper inventoryMapper;
     private final CoalTypeMapper coalTypeMapper;
     private final CoalQualityMapper coalQualityMapper;
+    private final ProductBatchMapper productBatchMapper;
     private final RuleMatchService ruleMatchService;
     private final CaseMatchService caseMatchService;
     private final KnowledgeAssembleService knowledgeAssembleService;
@@ -75,6 +83,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private final PlanScoreService planScoreService;
     private final RagRetrieveService ragRetrieveService;
     private final RagTraceService ragTraceService;
+    private final BatchNoGenerator batchNoGenerator;
+    private final BatchLineageService batchLineageService;
 
     @Override
     public IPage<BlendPlan> page(long current, long size, Long orderId, String planStatus, String planCode,
@@ -147,6 +157,86 @@ public class BlendPlanServiceImpl implements BlendPlanService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public BlendPlanExecuteResultVO execute(BlendPlanExecuteDTO dto) {
+        if (dto == null || dto.getPlanId() == null) {
+            throw new BusinessException("planId 不能为空");
+        }
+        BlendPlan plan = getById(dto.getPlanId());
+        List<BlendPlanDetail> details = listDetails(plan.getId());
+        if (details.isEmpty()) {
+            throw new BusinessException("方案明细为空，无法执行");
+        }
+        BigDecimal totalQty = details.stream()
+                .map(BlendPlanDetail::getUseQuantity)
+                .filter(v -> v != null)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (totalQty.compareTo(BigDecimal.ZERO) <= 0) {
+            Orders order = ordersMapper.selectById(plan.getOrderId());
+            totalQty = order == null || order.getDemandQuantity() == null ? BigDecimal.ZERO : order.getDemandQuantity();
+        }
+        ProductBatch finalProduct = new ProductBatch();
+        finalProduct.setProductBatchNo(batchNoGenerator.productBatchNo("mixed_product"));
+        finalProduct.setOrderId(plan.getOrderId());
+        finalProduct.setPlanId(plan.getId());
+        finalProduct.setProductType("mixed_product");
+        finalProduct.setProductName(plan.getPlanName() == null ? "最终混配产品" : plan.getPlanName());
+        finalProduct.setQuantity(totalQty);
+        finalProduct.setAvailableQuantity(totalQty);
+        finalProduct.setWarehouseCode(dto.getWarehouseCode());
+        finalProduct.setAshContent(weighted(details, BlendPlanDetail::getPredictedAsh));
+        finalProduct.setSulfurContent(weighted(details, BlendPlanDetail::getPredictedSulfur));
+        finalProduct.setMoistureContent(weighted(details, BlendPlanDetail::getPredictedMoisture));
+        finalProduct.setVolatileContent(weighted(details, BlendPlanDetail::getPredictedVolatile));
+        finalProduct.setCalorificValue(weighted(details, BlendPlanDetail::getPredictedCalorific));
+        finalProduct.setStatus("available");
+        finalProduct.setRemark(dto.getRemark());
+        productBatchMapper.insert(finalProduct);
+
+        for (BlendPlanDetail d : details) {
+            if (d.getProductBatchId() == null && !StringUtils.hasText(d.getProductBatchNo())) {
+                continue;
+            }
+            ProductBatch source = d.getProductBatchId() == null
+                    ? productBatchMapper.selectOne(new LambdaQueryWrapper<ProductBatch>()
+                    .eq(ProductBatch::getProductBatchNo, d.getProductBatchNo()).last("LIMIT 1"))
+                    : productBatchMapper.selectById(d.getProductBatchId());
+            if (source == null) {
+                continue;
+            }
+            BigDecimal useQty = d.getUseQuantity() == null ? BigDecimal.ZERO : d.getUseQuantity();
+            if (source.getAvailableQuantity() != null && source.getAvailableQuantity().compareTo(useQty) < 0) {
+                throw new BusinessException("产品批次库存不足：" + source.getProductBatchNo());
+            }
+            ProductBatch sourcePatch = new ProductBatch();
+            sourcePatch.setId(source.getId());
+            sourcePatch.setAvailableQuantity((source.getAvailableQuantity() == null ? BigDecimal.ZERO : source.getAvailableQuantity()).subtract(useQty));
+            productBatchMapper.updateById(sourcePatch);
+            batchLineageService.record(source.getProductBatchNo(), "product_batch", finalProduct.getProductBatchNo(),
+                    "final_product", "blending", useQty, d.getBlendRatio(), dto.getOperatorName(), "产品批次参与最终产品混配");
+        }
+
+        BlendPlan patch = new BlendPlan();
+        patch.setId(plan.getId());
+        patch.setFinalProductBatchNo(finalProduct.getProductBatchNo());
+        patch.setTraceStatus("executed");
+        patch.setPlanStatus("executed");
+        blendPlanMapper.updateById(patch);
+
+        BlendPlanExecuteResultVO vo = new BlendPlanExecuteResultVO();
+        vo.setFinalProductBatchNo(finalProduct.getProductBatchNo());
+        vo.setOrderId(plan.getOrderId());
+        vo.setPlanId(plan.getId());
+        vo.setQuantity(totalQty);
+        vo.getPredictedQuality().put("ashContent", finalProduct.getAshContent());
+        vo.getPredictedQuality().put("sulfurContent", finalProduct.getSulfurContent());
+        vo.getPredictedQuality().put("moistureContent", finalProduct.getMoistureContent());
+        vo.getPredictedQuality().put("volatileContent", finalProduct.getVolatileContent());
+        vo.getPredictedQuality().put("calorificValue", finalProduct.getCalorificValue());
+        return vo;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public BlendGenerateResultVO generate(BlendGenerateDTO dto) {
         Orders order = ordersMapper.selectById(dto.getOrderId());
         if (order == null) {
@@ -161,6 +251,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         constraints.put("referenceVolatile", order.getTargetVolatile());
         constraints.put("minCalorific", order.getTargetCalorific());
         constraints.put("priorityLevel", order.getPriorityLevel());
+        String candidateScope = StringUtils.hasText(dto.getCandidateScope()) ? dto.getCandidateScope() : "coal_type";
+        constraints.put("candidateScope", candidateScope);
 
         List<Inventory> inventories = inventoryMapper.selectList(new LambdaQueryWrapper<Inventory>()
                 .eq(Inventory::getStatus, 1)
@@ -177,35 +269,12 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 .filter(c -> c.getBlendableFlag() != null && c.getBlendableFlag() == 1)
                 .collect(Collectors.toMap(CoalType::getId, c -> c, (a, b) -> a));
 
-        List<Long> candidateCoalIds = bestInv.keySet().stream()
-                .filter(typeMap::containsKey)
-                .collect(Collectors.toList());
-
-        Map<Long, CoalQuality> qualityMap = new LinkedHashMap<>();
-        for (Long coalId : candidateCoalIds) {
-            CoalQuality q = coalQualityMapper.selectOne(new LambdaQueryWrapper<CoalQuality>()
-                    .eq(CoalQuality::getCoalId, coalId)
-                    .eq(CoalQuality::getStatus, 1)
-                    .orderByDesc(CoalQuality::getSampleTime)
-                    .last("limit 1"));
-            if (q != null) {
-                qualityMap.put(coalId, q);
-            }
-        }
-
-        List<PlanCoalSnapshot> shortlisted = candidateCoalIds.stream()
-                .filter(qualityMap::containsKey)
-                .map(cid -> new PlanCoalSnapshot(cid, typeMap.get(cid), qualityMap.get(cid), bestInv.get(cid)))
-                .filter(s -> s.getType() != null && s.getQuality() != null && s.getInventory() != null)
-                .sorted(Comparator
-                        .comparing((PlanCoalSnapshot s) -> shortlistScore(order, s)).reversed()
-                        .thenComparing(s -> nzSort(s.getQuality().getSulfurContent()))
-                        .thenComparing(s -> nzSort(s.getType().getPurchasePrice())))
-                .limit(MAX_SHORTLIST_COALS)
-                .collect(Collectors.toList());
+        List<PlanCoalSnapshot> shortlisted = "product_batch".equalsIgnoreCase(candidateScope)
+                ? buildProductBatchShortlist(order, typeMap)
+                : buildCoalTypeShortlist(order, bestInv, typeMap);
 
         if (shortlisted.size() < 2) {
-            throw new BusinessException(400, "可用煤种或煤质数据不足，无法生成方案");
+            throw new BusinessException(400, "可用候选物料或煤质数据不足，无法生成方案");
         }
 
         List<Long> shortlistedCoalIds = shortlisted.stream()
@@ -251,7 +320,9 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 recommended, order.getDemandQuantity());
         RagRetrieveResultVO ragRetrieveResult = ragRetrieveService.retrieveByOrder(order, 5);
         knowledgeContext.setRagRetrieveResult(ragRetrieveResult);
-        knowledgeContext.setRagKnowledgeText(ragRetrieveService.buildKnowledgeText(ragRetrieveResult));
+        String chainContext = buildPlanChainContext(best.planId);
+        knowledgeContext.setRagKnowledgeText(ragRetrieveService.buildKnowledgeText(ragRetrieveResult)
+                + (StringUtils.hasText(chainContext) ? "\n\n【方案批次来源追溯】\n" + chainContext : ""));
         vo.setKnowledgeContext(knowledgeContext);
         vo.setKnowledgeSummary(knowledgeAssembleService.summarize(knowledgeContext));
         vo.setRagRetrieveResult(ragRetrieveResult);
@@ -327,6 +398,161 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         return v == null ? BigDecimal.valueOf(Double.MAX_VALUE) : v;
     }
 
+    private List<PlanCoalSnapshot> buildCoalTypeShortlist(Orders order, Map<Long, Inventory> bestInv,
+                                                          Map<Long, CoalType> typeMap) {
+        List<Long> candidateCoalIds = bestInv.keySet().stream()
+                .filter(typeMap::containsKey)
+                .collect(Collectors.toList());
+
+        Map<Long, CoalQuality> qualityMap = new LinkedHashMap<>();
+        for (Long coalId : candidateCoalIds) {
+            CoalQuality q = coalQualityMapper.selectOne(new LambdaQueryWrapper<CoalQuality>()
+                    .eq(CoalQuality::getCoalId, coalId)
+                    .eq(CoalQuality::getStatus, 1)
+                    .orderByDesc(CoalQuality::getSampleTime)
+                    .last("limit 1"));
+            if (q != null) {
+                qualityMap.put(coalId, q);
+            }
+        }
+
+        return candidateCoalIds.stream()
+                .filter(qualityMap::containsKey)
+                .map(cid -> new PlanCoalSnapshot(cid, typeMap.get(cid), qualityMap.get(cid), bestInv.get(cid)))
+                .filter(s -> s.getType() != null && s.getQuality() != null && s.getInventory() != null)
+                .sorted(Comparator
+                        .comparing((PlanCoalSnapshot s) -> shortlistScore(order, s)).reversed()
+                        .thenComparing(s -> nzSort(s.getQuality().getSulfurContent()))
+                        .thenComparing(s -> nzSort(s.getType().getPurchasePrice())))
+                .limit(MAX_SHORTLIST_COALS)
+                .collect(Collectors.toList());
+    }
+
+    private List<PlanCoalSnapshot> buildProductBatchShortlist(Orders order, Map<Long, CoalType> typeMap) {
+        List<ProductBatch> products = productBatchMapper.selectList(new LambdaQueryWrapper<ProductBatch>()
+                .eq(ProductBatch::getStatus, "available")
+                .gt(ProductBatch::getAvailableQuantity, BigDecimal.ZERO)
+                .in(ProductBatch::getProductType, List.of("clean_coal", "mixed_product"))
+                .orderByDesc(ProductBatch::getAvailableQuantity)
+                .orderByDesc(ProductBatch::getId)
+                .last("LIMIT 30"));
+        return products.stream()
+                .filter(p -> p.getCoalId() != null && typeMap.containsKey(p.getCoalId()))
+                .filter(p -> productQualityBoundary(order, p))
+                .map(p -> toProductSnapshot(p, typeMap.get(p.getCoalId())))
+                .filter(s -> s.getType() != null && s.getQuality() != null && s.getInventory() != null)
+                .sorted(Comparator
+                        .comparing((PlanCoalSnapshot s) -> shortlistScore(order, s)).reversed()
+                        .thenComparing(s -> nzSort(s.getQuality().getSulfurContent()))
+                        .thenComparing(s -> nzSort(s.getType().getPurchasePrice())))
+                .limit(MAX_SHORTLIST_COALS)
+                .collect(Collectors.toList());
+    }
+
+    private boolean productQualityBoundary(Orders order, ProductBatch p) {
+        if (order.getTargetSulfur() != null && p.getSulfurContent() != null
+                && p.getSulfurContent().compareTo(order.getTargetSulfur().multiply(new BigDecimal("1.5"))) > 0) {
+            return false;
+        }
+        if (order.getTargetAsh() != null && p.getAshContent() != null
+                && p.getAshContent().compareTo(order.getTargetAsh().multiply(new BigDecimal("1.5"))) > 0) {
+            return false;
+        }
+        return true;
+    }
+
+    private PlanCoalSnapshot toProductSnapshot(ProductBatch p, CoalType baseType) {
+        CoalType t = new CoalType();
+        t.setId(baseType.getId());
+        t.setCoalCode(baseType.getCoalCode());
+        t.setCoalName((StringUtils.hasText(p.getProductName()) ? p.getProductName() : baseType.getCoalName())
+                + "（" + p.getProductBatchNo() + "）");
+        t.setCoalCategory(StringUtils.hasText(baseType.getCoalCategory()) ? baseType.getCoalCategory() : p.getProductType());
+        t.setPurchasePrice(baseType.getPurchasePrice());
+        t.setBlendableFlag(1);
+
+        CoalQuality q = new CoalQuality();
+        q.setCoalId(p.getCoalId());
+        q.setBatchNo(p.getProductBatchNo());
+        q.setSampleStage(p.getProductType());
+        q.setRelatedBatchNo(p.getProductBatchNo());
+        q.setAshContent(p.getAshContent());
+        q.setSulfurContent(p.getSulfurContent());
+        q.setMoistureContent(p.getMoistureContent());
+        q.setVolatileContent(p.getVolatileContent());
+        q.setCalorificValue(p.getCalorificValue());
+        q.setStatus(1);
+
+        Inventory inv = inventoryMapper.selectOne(new LambdaQueryWrapper<Inventory>()
+                .eq(Inventory::getProductBatchNo, p.getProductBatchNo())
+                .eq(Inventory::getStatus, 1)
+                .orderByAsc(Inventory::getId)
+                .last("LIMIT 1"));
+        if (inv == null) {
+            inv = new Inventory();
+            inv.setCoalId(p.getCoalId());
+            inv.setProductBatchNo(p.getProductBatchNo());
+            inv.setWarehouseCode(p.getWarehouseCode());
+            inv.setMaterialStage("product_batch");
+            inv.setStockQuantity(p.getQuantity());
+            inv.setAvailableQuantity(p.getAvailableQuantity());
+            inv.setStatus(1);
+        }
+
+        PlanCoalSnapshot s = new PlanCoalSnapshot(p.getCoalId(), t, q, inv);
+        s.setProductBatchId(p.getId());
+        s.setProductBatchNo(p.getProductBatchNo());
+        s.setProductBatchName(p.getProductName());
+        s.setQualitySnapshotJson(buildQualitySnapshotJson(p));
+        return s;
+    }
+
+    private String buildQualitySnapshotJson(ProductBatch p) {
+        return "{"
+                + "\"productBatchNo\":\"" + safeJson(p.getProductBatchNo()) + "\","
+                + "\"productType\":\"" + safeJson(p.getProductType()) + "\","
+                + "\"ashContent\":" + jsonNum(p.getAshContent()) + ","
+                + "\"sulfurContent\":" + jsonNum(p.getSulfurContent()) + ","
+                + "\"moistureContent\":" + jsonNum(p.getMoistureContent()) + ","
+                + "\"volatileContent\":" + jsonNum(p.getVolatileContent()) + ","
+                + "\"calorificValue\":" + jsonNum(p.getCalorificValue())
+                + "}";
+    }
+
+    private String buildPlanChainContext(Long planId) {
+        List<BlendPlanDetail> details = listDetails(planId);
+        StringBuilder sb = new StringBuilder();
+        for (BlendPlanDetail d : details) {
+            if (!StringUtils.hasText(d.getProductBatchNo())) {
+                continue;
+            }
+            if (!sb.isEmpty()) {
+                sb.append("\n");
+            }
+            sb.append("- 产品批次 ").append(d.getProductBatchNo())
+                    .append("，配比 ").append(d.getBlendRatio() == null ? "—" : d.getBlendRatio().multiply(new BigDecimal("100")).setScale(0, RoundingMode.HALF_UP) + "%")
+                    .append("，用量 ").append(d.getUseQuantity() == null ? "—" : d.getUseQuantity().stripTrailingZeros().toPlainString()).append(" 吨。");
+            List<com.coalblend.entity.BatchLineage> upstream = batchLineageService.upstream(d.getProductBatchNo());
+            if (!upstream.isEmpty()) {
+                sb.append("上游链路：");
+                sb.append(upstream.stream()
+                        .map(l -> l.getParentBatchNo() + " -> " + l.getChildBatchNo() + "(" + l.getProcessStage() + ")")
+                        .collect(Collectors.joining("；")));
+            } else {
+                sb.append("暂无上游血缘记录。");
+            }
+        }
+        return sb.toString();
+    }
+
+    private String safeJson(String s) {
+        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private String jsonNum(BigDecimal n) {
+        return n == null ? "null" : n.stripTrailingZeros().toPlainString();
+    }
+
     private BigDecimal shortlistScore(Orders order, PlanCoalSnapshot s) {
         BigDecimal score = BigDecimal.ZERO;
         CoalQuality q = s.getQuality();
@@ -345,6 +571,24 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             score = score.subtract(t.getPurchasePrice().divide(new BigDecimal("50"), 4, RoundingMode.HALF_UP));
         }
         return score;
+    }
+
+    private BigDecimal weighted(List<BlendPlanDetail> details, Function<BlendPlanDetail, BigDecimal> getter) {
+        BigDecimal total = BigDecimal.ZERO;
+        BigDecimal ratioTotal = BigDecimal.ZERO;
+        for (BlendPlanDetail d : details) {
+            BigDecimal v = getter.apply(d);
+            BigDecimal r = d.getBlendRatio();
+            if (v == null || r == null) {
+                continue;
+            }
+            total = total.add(v.multiply(r));
+            ratioTotal = ratioTotal.add(r);
+        }
+        if (ratioTotal.compareTo(BigDecimal.ZERO) <= 0) {
+            return null;
+        }
+        return total.divide(ratioTotal, 2, RoundingMode.HALF_UP);
     }
 
     private List<EvaluatedPlanDraft> buildCandidateDrafts(Orders order, List<PlanCoalSnapshot> shortlisted) {
@@ -473,6 +717,10 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             v.setId(d.getId());
             v.setPlanId(d.getPlanId());
             v.setCoalId(d.getCoalId());
+            v.setProductBatchId(d.getProductBatchId());
+            v.setProductBatchNo(d.getProductBatchNo());
+            v.setInventoryId(d.getInventoryId());
+            v.setQualitySnapshotJson(d.getQualitySnapshotJson());
             CoalType t = typeMap.get(d.getCoalId());
             v.setCoalName(t == null ? null : t.getCoalName());
             v.setBlendRatio(d.getBlendRatio());

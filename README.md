@@ -16,6 +16,7 @@
 - `db/patch_blend_plan_feedback.sql`（第2阶段：新增方案执行反馈与案例回流表）
 - `db/patch_feedback_case_fk_set_null.sql`（修正反馈回流案例外键，允许案例维护时保留反馈记录）
 - `db/patch_rag_phase4_integration.sql`（RAG 第四阶段：新增检索与生成追溯日志表）
+- `db/patch_full_chain_data_upgrade.sql`（完整数据链条：矿区来源、原煤生产、洗选加工、产品批次、最终质检、发运交付、批次血缘）
 - 可选：`db/seed_llm_model_config_example.sql`（示例模型配置，默认不启用）
 
 ### 配置
@@ -32,3 +33,7 @@
 RAG 第四阶段已接入 `/blendPlan/generate`：系统会根据订单约束从 `rag_knowledge` 检索规则、案例、术语和文档知识，并将 RAG 知识块并入大模型 Prompt。模型被要求严格输出 JSON：`ruleBasis`、`caseReference`、`recommendReason`、`riskTip`、`finalExplanation`。接口返回体新增 `ragRetrieveResult` 和 `ragExplanation`，同时向 `rag_retrieval_log` 写入关键词、命中知识 ID、最终 Prompt 与模型输出，便于方案追溯。
 
 可选执行 `db/seed_knowledge_step1.sql` 补充规则 R006～R012 与案例 C004～C010（按 `rule_code`/`case_code` 幂等更新）。
+
+## 完整数据链条
+
+说明见 `docs/coal_blending_full_chain_upgrade_plan.md`。系统新增 `/mineSource`、`/rawCoalBatch`、`/washProcess`、`/productBatch`、`/finalInspection`、`/shipmentDelivery`、`/trace` 等接口，并在前端新增“全链路数据”页面，支持“矿区来源 → 原煤生产 → 洗选加工 → 产品批次 → 最终质检 → 发运交付 → 批次追溯”的演示链路。

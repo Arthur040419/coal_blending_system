@@ -80,10 +80,15 @@ public class PlanScoreServiceImpl implements PlanScoreService {
 
             BlendPlanDetail d = new BlendPlanDetail();
             d.setCoalId(snapshot.getCoalId());
+            d.setProductBatchId(snapshot.getProductBatchId());
+            d.setProductBatchNo(snapshot.getProductBatchNo());
+            d.setQualitySnapshotJson(snapshot.getQualitySnapshotJson());
             d.setBlendRatio(r);
             d.setUseQuantity(useQty);
             d.setUnitCost(price);
-            d.setRemark("库存" + available.setScale(2, RoundingMode.HALF_UP).toPlainString()
+            String materialName = snapshot.getProductBatchNo() == null ? t.getCoalName()
+                    : (snapshot.getProductBatchName() + "（" + snapshot.getProductBatchNo() + "）");
+            d.setRemark(materialName + "；库存" + available.setScale(2, RoundingMode.HALF_UP).toPlainString()
                     + "吨，预计剩余" + remain.setScale(2, RoundingMode.HALF_UP).toPlainString() + "吨");
             details.add(d);
         }

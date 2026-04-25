@@ -47,6 +47,10 @@ public class BlendPlan {
     private String aiModelName;
     /** 是否由大模型生成：1 是，0 否 */
     private Integer aiGenerateFlag;
+    /** 方案执行后形成的最终产品批次号 */
+    private String finalProductBatchNo;
+    /** 追溯状态：not_executed/executed/inspected/shipped */
+    private String traceStatus;
     private Long createBy;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

@@ -22,6 +22,9 @@ public class CaseSample {
     private String qualityResult;
     private BigDecimal costResult;
     private String effectivenessEval;
+    private String businessStage;
+    private String relatedBatchNo;
+    private Long relatedOrderId;
     private Integer status;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

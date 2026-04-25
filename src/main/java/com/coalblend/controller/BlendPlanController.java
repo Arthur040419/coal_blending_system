@@ -3,10 +3,12 @@ package com.coalblend.controller;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.coalblend.common.result.Result;
 import com.coalblend.dto.BlendGenerateDTO;
+import com.coalblend.dto.BlendPlanExecuteDTO;
 import com.coalblend.dto.BlendPlanSelectDTO;
 import com.coalblend.entity.BlendPlan;
 import com.coalblend.entity.BlendPlanDetail;
 import com.coalblend.service.BlendPlanService;
+import com.coalblend.vo.blend.BlendPlanExecuteResultVO;
 import com.coalblend.vo.blend.BlendGenerateResultVO;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -80,5 +82,10 @@ public class BlendPlanController {
     public Result<Void> select(@RequestBody @Valid BlendPlanSelectDTO dto) {
         blendPlanService.selectPlan(dto.getPlanId());
         return Result.ok();
+    }
+
+    @PostMapping("/execute")
+    public Result<BlendPlanExecuteResultVO> execute(@RequestBody BlendPlanExecuteDTO dto) {
+        return Result.ok(blendPlanService.execute(dto));
     }
 }

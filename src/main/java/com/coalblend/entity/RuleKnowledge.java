@@ -21,6 +21,9 @@ public class RuleKnowledge {
     private Integer priorityLevel;
     private Integer status;
     private String sourceDesc;
+    private String businessStage;
+    private String qualityIndicator;
+    private String materialType;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }
