@@ -13,6 +13,7 @@ import com.coalblend.entity.BlendPlanDetail;
 import com.coalblend.dto.knowledge.KnowledgeContextDTO;
 import com.coalblend.entity.CoalQuality;
 import com.coalblend.entity.CoalType;
+import com.coalblend.entity.ExperimentRecord;
 import com.coalblend.entity.Inventory;
 import com.coalblend.entity.Orders;
 import com.coalblend.entity.ProductBatch;
@@ -24,6 +25,7 @@ import com.coalblend.mapper.InventoryMapper;
 import com.coalblend.mapper.OrdersMapper;
 import com.coalblend.mapper.ProductBatchMapper;
 import com.coalblend.service.BlendPlanService;
+import com.coalblend.service.ExperimentRecordService;
 import com.coalblend.service.chain.BatchLineageService;
 import com.coalblend.service.chain.BatchNoGenerator;
 import com.coalblend.service.intelligent.AiBlendCandidateService;
@@ -96,6 +98,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private final BatchNoGenerator batchNoGenerator;
     private final BatchLineageService batchLineageService;
     private final CoalBlendProperties coalBlendProperties;
+    private final ExperimentRecordService experimentRecordService;
 
     @Override
     public IPage<BlendPlan> page(long current, long size, Long orderId, String planStatus, String planCode,
@@ -313,7 +316,11 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             throw new BusinessException(400, "未能生成可用配煤方案，请检查煤质和库存数据");
         }
 
-        List<ScoredPlan> persistedPlans = persistPlans(order, preferred, dto.getCreateBy(), typeMap);
+        String experimentCode = StringUtils.hasText(dto.getExperimentCode())
+                ? dto.getExperimentCode().trim()
+                : buildExperimentCode(order, aiCandidateResult);
+        List<ScoredPlan> persistedPlans = persistPlans(order, preferred, dto.getCreateBy(), typeMap,
+                experimentCode, aiCandidateResult.getModelName());
         ScoredPlan best = persistedPlans.get(0);
         List<ScoredPlan> others = persistedPlans.subList(1, persistedPlans.size());
 
@@ -327,6 +334,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         vo.setConstraints(constraints);
         constraints.put("shortlistedCoalCount", shortlisted.size());
         constraints.put("generatedPlanCount", persistedPlans.size());
+        constraints.put("experimentCode", experimentCode);
+        constraints.put("experimentModelName", aiCandidateResult.getModelName());
         constraints.put("systemEnumerationEnabled", coalBlendProperties.isEnableSystemEnumeration());
         constraints.put("aiCandidatePlanCount", aiCandidateResult.getPlans().size());
         constraints.put("acceptedAiCandidateCount", aiDrafts.size());
@@ -828,7 +837,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     }
 
     private List<ScoredPlan> persistPlans(Orders order, List<EvaluatedPlanDraft> drafts, Long createBy,
-                                          Map<Long, CoalType> typeMap) {
+                                          Map<Long, CoalType> typeMap, String experimentCode,
+                                          String aiModelName) {
         long ts = System.currentTimeMillis();
         List<ScoredPlan> persisted = new ArrayList<>();
         for (int i = 0; i < drafts.size(); i++) {
@@ -855,15 +865,102 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             plan.setRiskLevel(constraint.riskLevel());
             plan.setCandidateSource(StringUtils.hasText(draft.getCandidateSource()) ? draft.getCandidateSource() : "system");
             plan.setAiCandidateReason(draft.getAiCandidateReason());
+            if ("ai".equalsIgnoreCase(plan.getCandidateSource()) && StringUtils.hasText(aiModelName)) {
+                plan.setAiModelName(aiModelName);
+                plan.setAiGenerateFlag(1);
+            }
             plan.setCreateBy(createBy);
             blendPlanMapper.insert(plan);
             for (BlendPlanDetail d : draft.getDetails()) {
                 d.setPlanId(plan.getId());
                 blendPlanDetailMapper.insert(d);
             }
+            persistExperimentRecord(experimentCode, order, plan, draft, aiModelName);
             persisted.add(new ScoredPlan(plan.getId(), score.getOverallScore()));
         }
         return persisted;
+    }
+
+    private void persistExperimentRecord(String experimentCode, Orders order, BlendPlan plan,
+                                         EvaluatedPlanDraft draft, String aiModelName) {
+        ConstraintResult constraint = draft.getConstraintResult();
+        ScoreDetail score = draft.getScoreDetail();
+        ExperimentRecord record = new ExperimentRecord();
+        record.setExperimentCode(experimentCode);
+        record.setOrderId(order.getId());
+        record.setModelName(resolveExperimentModelName(draft, aiModelName));
+        record.setPlanId(plan.getId());
+        record.setTotalCost(draft.getTotalCost());
+        record.setAvgAsh(constraint.getPredictedAsh());
+        record.setAvgSulfur(constraint.getPredictedSulfur());
+        record.setAvgMoisture(constraint.getPredictedMoisture());
+        record.setAvgCalorific(constraint.getPredictedCalorific());
+        record.setQualityScore(score.getQualityScore());
+        record.setCostScore(score.getCostScore());
+        record.setInventoryScore(score.getStabilityScore());
+        record.setFinalScore(score.getOverallScore());
+        record.setConstraintHit(buildExperimentConstraintJson(draft));
+        record.setRiskWarning(StringUtils.hasText(draft.getRiskTip()) ? draft.getRiskTip() : constraint.riskLevel());
+        record.setExplainText(buildExperimentExplainText(draft));
+        record.setCreateTime(LocalDateTime.now());
+        experimentRecordService.saveRecord(record);
+    }
+
+    private String resolveExperimentModelName(EvaluatedPlanDraft draft, String aiModelName) {
+        String source = StringUtils.hasText(draft.getCandidateSource()) ? draft.getCandidateSource() : "system";
+        String modelName;
+        if ("ai".equalsIgnoreCase(source)) {
+            modelName = StringUtils.hasText(aiModelName) ? aiModelName : "ai-model";
+        } else {
+            modelName = "system-enumeration";
+        }
+        return modelName.length() > 50 ? modelName.substring(0, 50) : modelName;
+    }
+
+    private String buildExperimentExplainText(EvaluatedPlanDraft draft) {
+        StringBuilder sb = new StringBuilder();
+        if (StringUtils.hasText(draft.getAiCandidateReason())) {
+            sb.append("【模型生成理由】").append(draft.getAiCandidateReason());
+        }
+        if (StringUtils.hasText(draft.getExplanation())) {
+            if (!sb.isEmpty()) {
+                sb.append("\n");
+            }
+            sb.append("【评分解释】").append(draft.getExplanation());
+        }
+        return sb.toString();
+    }
+
+    private String buildExperimentConstraintJson(EvaluatedPlanDraft draft) {
+        ConstraintResult c = draft.getConstraintResult();
+        return "{"
+                + "\"candidateSource\":\"" + safeJson(draft.getCandidateSource()) + "\","
+                + "\"feasible\":" + c.isFeasible() + ","
+                + "\"riskLevel\":\"" + safeJson(c.riskLevel()) + "\","
+                + "\"violations\":" + jsonArray(c.getViolations()) + ","
+                + "\"warnings\":" + jsonArray(c.getWarnings()) + ","
+                + "\"scoreDetail\":\"" + safeJson(buildScoreDetailSummary(draft.getScoreDetail())) + "\""
+                + "}";
+    }
+
+    private String jsonArray(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return "[]";
+        }
+        return values.stream()
+                .map(v -> "\"" + safeJson(v) + "\"")
+                .collect(Collectors.joining(",", "[", "]"));
+    }
+
+    private String buildExperimentCode(Orders order, AiBlendCandidateResult aiCandidateResult) {
+        String model = aiCandidateResult == null ? "unknown" : aiCandidateResult.getModelName();
+        String modelTag = StringUtils.hasText(model)
+                ? model.replaceAll("[^A-Za-z0-9_-]", "-")
+                : "unknown";
+        if (modelTag.length() > 18) {
+            modelTag = modelTag.substring(0, 18);
+        }
+        return "EXP-O" + order.getId() + "-" + modelTag + "-" + System.currentTimeMillis();
     }
 
     private String buildConstraintSummary(ConstraintResult c) {
