@@ -1,12 +1,16 @@
 package com.coalblend.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.coalblend.vo.blend.DecisionProblemItemVO;
+import com.coalblend.vo.blend.DecisionSuggestionItemVO;
 import lombok.Data;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 @TableName("blend_plan")
@@ -55,6 +59,24 @@ public class BlendPlan {
     private String candidateSource;
     /** AI候选生成理由 */
     private String aiCandidateReason;
+    private String decisionStatus;
+    private String recommendationMode;
+    private String scoreStrategy;
+    private Integer paretoRank;
+    private BigDecimal objectiveCostPerTon;
+    private BigDecimal objectiveQualityDeviation;
+    private BigDecimal objectiveExecutionRisk;
+    private String problemItemsJson;
+    private String suggestionItemsJson;
+    private String generationConfigJson;
+    @TableField(exist = false)
+    private List<DecisionProblemItemVO> problemItems;
+    @TableField(exist = false)
+    private List<DecisionSuggestionItemVO> suggestionItems;
+    @TableField(exist = false)
+    private String decisionStatusLabel;
+    @TableField(exist = false)
+    private String recommendationModeLabel;
     private Long createBy;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

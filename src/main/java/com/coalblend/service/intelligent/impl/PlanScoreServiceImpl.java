@@ -5,7 +5,9 @@ import com.coalblend.entity.CoalQuality;
 import com.coalblend.entity.CoalType;
 import com.coalblend.entity.Inventory;
 import com.coalblend.entity.Orders;
+import com.coalblend.enums.ScoreStrategyType;
 import com.coalblend.service.intelligent.PlanScoreService;
+import com.coalblend.service.intelligent.model.BlendGenerationRuntimeConfig;
 import com.coalblend.service.intelligent.model.ConstraintResult;
 import com.coalblend.service.intelligent.model.EvaluatedPlanDraft;
 import com.coalblend.service.intelligent.model.PlanCoalSnapshot;
@@ -52,6 +54,13 @@ public class PlanScoreServiceImpl implements PlanScoreService {
 
     @Override
     public EvaluatedPlanDraft evaluate(Orders order, List<PlanCoalSnapshot> snapshots, List<BigDecimal> ratios) {
+        return evaluate(order, snapshots, ratios, ScoreStrategyType.BALANCED, defaultRuntimeConfig());
+    }
+
+    @Override
+    public EvaluatedPlanDraft evaluate(Orders order, List<PlanCoalSnapshot> snapshots, List<BigDecimal> ratios,
+                                       ScoreStrategyType scoreStrategy, BlendGenerationRuntimeConfig runtimeConfig) {
+        ScoreStrategyType strategy = scoreStrategy == null ? ScoreStrategyType.BALANCED : scoreStrategy;
         // ── 1. 加权预测各煤质指标 ──
         BigDecimal wAsh = ZERO, wS = ZERO, wM = ZERO, wV = ZERO, wCal = ZERO;
         BigDecimal totalCost = ZERO;
@@ -91,6 +100,7 @@ public class PlanScoreServiceImpl implements PlanScoreService {
             d.setCoalId(snapshot.getCoalId());
             d.setProductBatchId(snapshot.getProductBatchId());
             d.setProductBatchNo(snapshot.getProductBatchNo());
+            d.setInventoryId(inv.getId());
             d.setQualitySnapshotJson(snapshot.getQualitySnapshotJson());
             d.setBlendRatio(r);
             d.setUseQuantity(useQty);
@@ -112,7 +122,7 @@ public class PlanScoreServiceImpl implements PlanScoreService {
         fillMetricConstraints(order, constraint, pAsh, pS, pM, pCal);
 
         // ── 2. 多维度评分 ──
-        ScoreDetail score = buildScoreDetail(order, details, snapshots, totalCost, pAsh, pS, pM, pCal);
+        ScoreDetail score = buildScoreDetail(order, details, snapshots, totalCost, pAsh, pS, pM, pCal, strategy);
         String explanation = buildPlanExplanation(snapshots, details, pAsh, pS, pCal, score, constraint.isFeasible());
 
         // ── 3. 组装结果 ──
@@ -120,12 +130,23 @@ public class PlanScoreServiceImpl implements PlanScoreService {
         draft.setCoalIds(snapshots.stream().map(PlanCoalSnapshot::getCoalId).collect(Collectors.toList()));
         draft.setRatios(ratios);
         draft.setDetails(details);
+        draft.setSnapshots(snapshots);
         draft.setTotalCost(totalCost.setScale(2, RoundingMode.HALF_UP));
         draft.setConstraintResult(constraint);
         draft.setScoreDetail(score);
         draft.setExplanation(explanation);
         draft.setRiskTip(buildRiskTip(constraint));
+        draft.setScoreStrategy(strategy.name());
         return draft;
+    }
+
+    private BlendGenerationRuntimeConfig defaultRuntimeConfig() {
+        BlendGenerationRuntimeConfig config = new BlendGenerationRuntimeConfig();
+        config.setScoreStrategy(ScoreStrategyType.BALANCED);
+        config.setRatioStep(new BigDecimal("0.05"));
+        config.setMaxMaterialCount(3);
+        config.setMinSingleRatio(new BigDecimal("0.05"));
+        return config;
     }
 
     // ═══════════════════════════════════════════════
@@ -170,7 +191,7 @@ public class PlanScoreServiceImpl implements PlanScoreService {
     private ScoreDetail buildScoreDetail(Orders order, List<BlendPlanDetail> details,
                                          List<PlanCoalSnapshot> snapshots,
                                          BigDecimal totalCost, BigDecimal ash, BigDecimal sulfur,
-                                         BigDecimal m, BigDecimal cal) {
+                                         BigDecimal m, BigDecimal cal, ScoreStrategyType scoreStrategy) {
         // ── 子维度评分 ──
         BigDecimal ashScore = scoreAshMargin(order, ash);
         BigDecimal sulfurScore = scoreSulfurMargin(order, sulfur);
@@ -197,9 +218,9 @@ public class PlanScoreServiceImpl implements PlanScoreService {
         BigDecimal stabilityScore = scoreStabilityScaled(details, snapshots, order.getDemandQuantity(), distinctAreas);
 
         // ── 综合评分 ──
-        BigDecimal overall = qualityScore.multiply(new BigDecimal("0.50"))
-                .add(costScore.multiply(new BigDecimal("0.20")))
-                .add(stabilityScore.multiply(new BigDecimal("0.30")))
+        BigDecimal overall = qualityScore.multiply(scoreStrategy.getQualityWeight())
+                .add(costScore.multiply(scoreStrategy.getCostWeight()))
+                .add(stabilityScore.multiply(scoreStrategy.getStabilityWeight()))
                 .setScale(2, RoundingMode.HALF_UP);
 
         // ── 生成具体评分理由 ──
@@ -208,11 +229,15 @@ public class PlanScoreServiceImpl implements PlanScoreService {
         detail.setCostScore(costScore);
         detail.setStabilityScore(stabilityScore);
         detail.setOverallScore(overall);
+        detail.setScoreStrategy(scoreStrategy.name());
+        detail.setQualityWeight(scoreStrategy.getQualityWeight());
+        detail.setCostWeight(scoreStrategy.getCostWeight());
+        detail.setStabilityWeight(scoreStrategy.getStabilityWeight());
 
         detail.setQualityReason(buildQualityReason(order, ash, sulfur, m, cal, ashScore, sulfurScore, moistureScore, calorificScore, qualityScore));
         detail.setCostReason(buildCostReason(totalCost, order.getDemandQuantity(), cal, costScore));
         detail.setStabilityReason(buildStabilityReason(details, snapshots, distinctAreas, stabilityScore));
-        detail.setOverallReason(buildOverallReason(qualityScore, costScore, stabilityScore, overall));
+        detail.setOverallReason(buildOverallReason(qualityScore, costScore, stabilityScore, overall, scoreStrategy));
 
         return detail;
     }
@@ -456,9 +481,19 @@ public class PlanScoreServiceImpl implements PlanScoreService {
         return sb.toString();
     }
 
-    private String buildOverallReason(BigDecimal quality, BigDecimal cost, BigDecimal stability, BigDecimal overall) {
-        return "综合评分 " + overall + " = 质量" + quality + "×50% + 成本" + cost
-                + "×20% + 稳定性" + stability + "×30%。";
+    private String buildOverallReason(BigDecimal quality, BigDecimal cost, BigDecimal stability,
+                                      BigDecimal overall, ScoreStrategyType scoreStrategy) {
+        return "综合评分 " + overall + " = 质量" + quality + " × " + percent(scoreStrategy.getQualityWeight())
+                + " + 成本" + cost + " × " + percent(scoreStrategy.getCostWeight())
+                + " + 稳定性" + stability + " × " + percent(scoreStrategy.getStabilityWeight())
+                + "，当前策略：" + scoreStrategy.getLabel() + "。";
+    }
+
+    private String percent(BigDecimal value) {
+        if (value == null) {
+            return "0%";
+        }
+        return value.multiply(HUNDRED).setScale(0, RoundingMode.HALF_UP).toPlainString() + "%";
     }
 
     // ═══════════════════════════════════════════════

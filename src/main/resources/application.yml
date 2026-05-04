@@ -34,6 +34,17 @@ coal:
     # 当前实验阶段默认关闭系统枚举，仅使用 AI 候选 + 既有评分标准，便于优化前后对比。
     # 如需恢复系统枚举，可设置 COAL_BLEND_ENABLE_SYSTEM_ENUMERATION=true。
     enable-system-enumeration: ${COAL_BLEND_ENABLE_SYSTEM_ENUMERATION:false}
+    optimization:
+      ratio-step: 0.05
+      max-shortlist-coals: 8
+      max-material-count: 3
+      max-return-plans: 6
+      max-evaluated-candidates: 25000
+      min-single-ratio: 0.05
+      high-single-ratio-threshold: 0.75
+      low-inventory-margin-rate: 0.10
+      low-quality-margin-rate: 0.05
+      low-calorific-margin-rate: 0.02
   llm:
     enabled: ${COAL_LLM_ENABLED:true}
     connect-timeout: ${COAL_LLM_CONNECT_TIMEOUT:30s}

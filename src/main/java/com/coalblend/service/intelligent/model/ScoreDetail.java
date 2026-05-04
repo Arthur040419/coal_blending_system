@@ -15,4 +15,8 @@ public class ScoreDetail {
     private String costReason;
     private String stabilityReason;
     private String overallReason;
+    private String scoreStrategy;
+    private BigDecimal qualityWeight;
+    private BigDecimal costWeight;
+    private BigDecimal stabilityWeight;
 }

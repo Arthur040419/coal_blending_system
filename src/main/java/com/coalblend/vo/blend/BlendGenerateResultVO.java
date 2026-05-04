@@ -40,4 +40,23 @@ public class BlendGenerateResultVO {
     /** 大模型基于 RAG 上下文生成的解释结果 */
     private AiExplainResultVO ragExplanation;
     private String explainSummary;
+
+    /** 总体决策状态：FEASIBLE / RISKY / INFEASIBLE */
+    private String decisionStatus;
+    /** 决策状态中文名 */
+    private String decisionStatusLabel;
+    /** 推荐模式：NORMAL / RISK_REFERENCE / NO_SOLUTION */
+    private String recommendationMode;
+    /** 推荐模式中文说明 */
+    private String recommendationModeLabel;
+    /** 总体决策摘要 */
+    private String decisionSummary;
+    /** 当前订单和候选空间下的主要问题 */
+    private List<DecisionProblemItemVO> problemItems;
+    /** 面向用户的调整建议 */
+    private List<DecisionSuggestionItemVO> suggestionItems;
+    /** 多目标 Pareto 概览 */
+    private ParetoSummaryVO paretoSummary;
+    /** 本次生成使用的评分和搜索配置 */
+    private GenerationConfigVO generationConfig;
 }
