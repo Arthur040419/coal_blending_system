@@ -52,13 +52,15 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
                                                      List<MatchedRuleVO> matchedRules,
                                                      List<MatchedCaseVO> matchedCases,
                                                      RagRetrieveResultVO ragRetrieveResult,
-                                                     String candidateScope) {
+                                                     String candidateScope,
+                                                     Long modelConfigId) {
         AiBlendCandidateResult result = new AiBlendCandidateResult();
-        ModelConfig cfg = loadActiveModelConfig();
+        ModelConfig cfg = loadModelConfig(modelConfigId);
         if (!coalLlmProperties.isEnabled() || cfg == null || !StringUtils.hasText(cfg.getApiUrl())) {
             result.setErrorMessage("未启用大模型或未配置可用 LLM");
             return result;
         }
+        result.setModelConfigId(cfg.getId());
         result.setModelName(cfg.getModelName());
         String prompt = buildPrompt(order, candidates, matchedRules, matchedCases, ragRetrieveResult, candidateScope);
         try {
@@ -74,7 +76,11 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
         }
     }
 
-    private ModelConfig loadActiveModelConfig() {
+    private ModelConfig loadModelConfig(Long modelConfigId) {
+        if (modelConfigId != null) {
+            ModelConfig cfg = modelConfigMapper.selectById(modelConfigId);
+            return isUsableLlmConfig(cfg) ? cfg : null;
+        }
         return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfig>()
                 .eq(ModelConfig::getStatus, 1)
                 .in(ModelConfig::getModelType, List.of("LLM", "LOCAL_OLLAMA"))
@@ -82,6 +88,13 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
                 .ne(ModelConfig::getApiUrl, "")
                 .orderByDesc(ModelConfig::getId)
                 .last("LIMIT 1"));
+    }
+
+    private boolean isUsableLlmConfig(ModelConfig cfg) {
+        return cfg != null
+                && Integer.valueOf(1).equals(cfg.getStatus())
+                && List.of("LLM", "LOCAL_OLLAMA").contains(cfg.getModelType())
+                && StringUtils.hasText(cfg.getApiUrl());
     }
 
     private String buildPrompt(Orders order,
@@ -333,4 +346,3 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
         return value == null ? "—" : value.stripTrailingZeros().toPlainString();
     }
 }
-

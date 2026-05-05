@@ -19,5 +19,5 @@ public interface ModelInferenceService {
      */
     AiExplainResultVO enrichRecommendedPlan(Long recommendedPlanId, Orders order, PlanWithDetailsVO recommended,
                                             List<MatchedRuleVO> matchedRules, List<MatchedCaseVO> matchedCases,
-                                            KnowledgeContextDTO knowledgeContext);
+                                            KnowledgeContextDTO knowledgeContext, Long modelConfigId);
 }

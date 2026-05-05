@@ -298,6 +298,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         constraints.put("referenceVolatile", order.getTargetVolatile());
         constraints.put("minCalorific", order.getTargetCalorific());
         constraints.put("priorityLevel", order.getPriorityLevel());
+        constraints.put("modelConfigId", dto.getModelConfigId());
         String candidateScope = StringUtils.hasText(dto.getCandidateScope()) ? dto.getCandidateScope() : "coal_type";
         constraints.put("candidateScope", candidateScope);
         constraints.put("scoreStrategy", runtimeConfig.getScoreStrategy().name());
@@ -337,7 +338,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         RagRetrieveResultVO ragRetrieveResult = ragRetrieveService.retrieveByOrder(order, 5);
 
         AiBlendCandidateResult aiCandidateResult = aiBlendCandidateService.generateCandidates(
-                order, shortlisted, matchedRules, matchedCases, ragRetrieveResult, candidateScope);
+                order, shortlisted, matchedRules, matchedCases, ragRetrieveResult, candidateScope, dto.getModelConfigId());
         List<EvaluatedPlanDraft> aiDrafts = buildAiCandidateDrafts(order, shortlisted, aiCandidateResult, runtimeConfig);
         List<EvaluatedPlanDraft> systemDrafts = coalBlendProperties.isEnableSystemEnumeration()
                 ? buildCandidateDrafts(order, shortlisted, runtimeConfig)
@@ -449,7 +450,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             vo.setKnowledgeSummary(knowledgeAssembleService.summarize(knowledgeContext));
 
             AiExplainResultVO ai = modelInferenceService.enrichRecommendedPlan(
-                    best.planId, order, recommended, matchedRules, matchedCases, knowledgeContext);
+                    best.planId, order, recommended, matchedRules, matchedCases, knowledgeContext, dto.getModelConfigId());
             ragTraceService.saveBlendGenerateTrace(best.planId, ragRetrieveResult, ai);
             vo.setRecommendedPlan(toVo(best.planId, typeMap));
             vo.setRagExplanation(ai);

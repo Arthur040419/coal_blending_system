@@ -65,12 +65,12 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
     @Override
     public AiExplainResultVO enrichRecommendedPlan(Long recommendedPlanId, Orders order, PlanWithDetailsVO recommended,
                                                    List<MatchedRuleVO> matchedRules, List<MatchedCaseVO> matchedCases,
-                                                   KnowledgeContextDTO knowledgeContext) {
+                                                   KnowledgeContextDTO knowledgeContext, Long modelConfigId) {
         AiExplainRequestDTO req = promptBuildService.buildRequest(order, recommended, matchedRules, matchedCases,
                 knowledgeContext);
         String prompt = promptBuildService.buildPrompt(req, knowledgeContext);
 
-        ModelConfig cfg = loadActiveModelConfig();
+        ModelConfig cfg = loadModelConfig(modelConfigId);
         if (!coalLlmProperties.isEnabled() || cfg == null || !StringUtils.hasText(cfg.getApiUrl())) {
             log.info("Skip LLM call (enabled={}, configPresent={})", coalLlmProperties.isEnabled(), cfg != null);
             AiExplainResultVO fallback = persistFallback(recommendedPlanId, cfg, "未启用大模型或未配置有效 model_config");
@@ -108,7 +108,11 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
         }
     }
 
-    private ModelConfig loadActiveModelConfig() {
+    private ModelConfig loadModelConfig(Long modelConfigId) {
+        if (modelConfigId != null) {
+            ModelConfig cfg = modelConfigMapper.selectById(modelConfigId);
+            return isUsableLlmConfig(cfg) ? cfg : null;
+        }
         return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfig>()
                 .eq(ModelConfig::getStatus, 1)
                 .in(ModelConfig::getModelType, List.of("LLM", "LOCAL_OLLAMA"))
@@ -116,6 +120,13 @@ public class ModelInferenceServiceImpl implements ModelInferenceService {
                 .ne(ModelConfig::getApiUrl, "")
                 .orderByDesc(ModelConfig::getId)
                 .last("LIMIT 1"));
+    }
+
+    private boolean isUsableLlmConfig(ModelConfig cfg) {
+        return cfg != null
+                && Integer.valueOf(1).equals(cfg.getStatus())
+                && List.of("LLM", "LOCAL_OLLAMA").contains(cfg.getModelType())
+                && StringUtils.hasText(cfg.getApiUrl());
     }
 
     private String callChatCompletions(ModelConfig cfg, String prompt) throws Exception {

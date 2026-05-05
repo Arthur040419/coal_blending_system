@@ -16,6 +16,6 @@ public interface AiBlendCandidateService {
                                                List<MatchedRuleVO> matchedRules,
                                                List<MatchedCaseVO> matchedCases,
                                                RagRetrieveResultVO ragRetrieveResult,
-                                               String candidateScope);
+                                               String candidateScope,
+                                               Long modelConfigId);
 }
-

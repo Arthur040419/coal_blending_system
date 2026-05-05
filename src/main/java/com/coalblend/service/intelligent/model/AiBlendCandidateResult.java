@@ -9,9 +9,9 @@ import java.util.List;
 public class AiBlendCandidateResult {
 
     private boolean aiGenerated;
+    private Long modelConfigId;
     private String modelName;
     private String rawText;
     private String errorMessage;
     private List<AiBlendCandidatePlan> plans = new ArrayList<>();
 }
-

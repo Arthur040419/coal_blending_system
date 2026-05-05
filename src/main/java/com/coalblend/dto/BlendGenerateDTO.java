@@ -14,6 +14,11 @@ public class BlendGenerateDTO {
     private Long createBy;
 
     /**
+     * 手动指定本次智能配煤调用的大模型配置。为空时沿用系统默认最新启用模型。
+     */
+    private Long modelConfigId;
+
+    /**
      * 候选物料范围：coal_type（默认煤种级）/ product_batch（洗后产品批次级）/ mixed（预留）。
      */
     private String candidateScope;
