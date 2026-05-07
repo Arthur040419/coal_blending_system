@@ -24,6 +24,17 @@
 - 在表 `model_config` 中维护 **`status = 1`** 且 **`api_url` 非空** 的一条记录；`api_url` 为完整地址，例如 `http://127.0.0.1:11434/v1/chat/completions`（Ollama）。
 - `application.yml` 中 `coal.llm`：无密钥或离线开发可设环境变量 **`COAL_LLM_ENABLED=false`**，将直接使用兜底文案且不发起 HTTP。
 
+### 云服务器 / Docker 中的 Ollama 地址
+
+如果后端运行在 Docker 容器内，而 Ollama 运行在宿主机上，`model_config.api_url` 不要写 `127.0.0.1` 或 `localhost`，因为这会指向后端容器自身。可按部署方式改成：
+
+- Docker Desktop：`http://host.docker.internal:11434/v1/chat/completions` 或 `http://host.docker.internal:11434/api/chat`
+- Linux Docker 默认网桥：通常为 `http://172.17.0.1:11434/v1/chat/completions`，以服务器实际 Docker 网桥地址为准
+- 同一 Docker Compose 网络：写 Ollama 服务名，例如 `http://ollama:11434/api/chat`
+- 不使用容器、后端和 Ollama 都在同一宿主机进程中：才使用 `http://127.0.0.1:11434/...`
+
+Ollama 需要允许非本机回环访问，例如设置 `OLLAMA_HOST=0.0.0.0:11434`，并确认服务器防火墙/安全组只向后端可信来源放通。后端日志中出现 `Calling LLM candidate endpoint` 或 `Calling LLM explanation endpoint`，才表示已经真正发起模型 HTTP 请求；如果只看到 `Skip ... LLM call`，请优先检查 `status`、`model_type`、`api_url` 和 `COAL_LLM_ENABLED`。
+
 ## 知识库（第 1 步落地）
 
 说明见 `docs/第1步知识库落地的详细实现方案.md`。`/blendPlan/generate` 会调用 **规则匹配**、**案例检索**、**知识组装**，在返回体中附带 `matchedRules`（含 `hitReason`）、`matchedCases`（含 `matchReason`/`summary`）、`knowledgeSummary`、`knowledgeContext`（含可拼 Prompt 的 `orderText`/`inventoryText`/`rulesText`/`casesText`）。

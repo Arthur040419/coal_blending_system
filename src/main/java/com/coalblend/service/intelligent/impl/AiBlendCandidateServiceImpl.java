@@ -9,6 +9,7 @@ import com.coalblend.entity.ModelConfig;
 import com.coalblend.entity.Orders;
 import com.coalblend.mapper.ModelConfigMapper;
 import com.coalblend.service.intelligent.AiBlendCandidateService;
+import com.coalblend.service.intelligent.LlmConfigSupport;
 import com.coalblend.service.intelligent.model.AiBlendCandidateItem;
 import com.coalblend.service.intelligent.model.AiBlendCandidatePlan;
 import com.coalblend.service.intelligent.model.AiBlendCandidateResult;
@@ -56,8 +57,16 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
                                                      Long modelConfigId) {
         AiBlendCandidateResult result = new AiBlendCandidateResult();
         ModelConfig cfg = loadModelConfig(modelConfigId);
-        if (!coalLlmProperties.isEnabled() || cfg == null || !StringUtils.hasText(cfg.getApiUrl())) {
-            result.setErrorMessage("未启用大模型或未配置可用 LLM");
+        if (!coalLlmProperties.isEnabled() || !LlmConfigSupport.isUsableLlmConfig(cfg)) {
+            String reason = !coalLlmProperties.isEnabled() ? "coal.llm.enabled=false" : LlmConfigSupport.unusableReason(cfg);
+            log.warn("Skip AI candidate generation LLM call: reason={}, requestedModelConfigId={}, configId={}, name={}, type={}, status={}, hasUrl={}",
+                    reason, modelConfigId,
+                    cfg == null ? null : cfg.getId(),
+                    cfg == null ? null : cfg.getModelName(),
+                    cfg == null ? null : cfg.getModelType(),
+                    cfg == null ? null : cfg.getStatus(),
+                    cfg != null && StringUtils.hasText(cfg.getApiUrl()));
+            result.setErrorMessage("未启用大模型或未配置可用 LLM：" + reason);
             return result;
         }
         result.setModelConfigId(cfg.getId());
@@ -68,9 +77,10 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
             result.setRawText(raw);
             result.setPlans(parsePlans(raw));
             result.setAiGenerated(!result.getPlans().isEmpty());
+            log.info("AI candidate generation parsed: modelConfigId={}, planCount={}", cfg.getId(), result.getPlans().size());
             return result;
         } catch (Exception e) {
-            log.warn("AI candidate generation failed: {}", e.getMessage());
+            log.warn("AI candidate generation failed: {}", e.getMessage(), e);
             result.setErrorMessage(e.getClass().getSimpleName() + ": " + e.getMessage());
             return result;
         }
@@ -78,23 +88,15 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
 
     private ModelConfig loadModelConfig(Long modelConfigId) {
         if (modelConfigId != null) {
-            ModelConfig cfg = modelConfigMapper.selectById(modelConfigId);
-            return isUsableLlmConfig(cfg) ? cfg : null;
+            return modelConfigMapper.selectById(modelConfigId);
         }
         return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfig>()
                 .eq(ModelConfig::getStatus, 1)
-                .in(ModelConfig::getModelType, List.of("LLM", "LOCAL_OLLAMA"))
+                .in(ModelConfig::getModelType, List.of("LLM", "LOCAL_OLLAMA", "OLLAMA"))
                 .isNotNull(ModelConfig::getApiUrl)
                 .ne(ModelConfig::getApiUrl, "")
                 .orderByDesc(ModelConfig::getId)
                 .last("LIMIT 1"));
-    }
-
-    private boolean isUsableLlmConfig(ModelConfig cfg) {
-        return cfg != null
-                && Integer.valueOf(1).equals(cfg.getStatus())
-                && List.of("LLM", "LOCAL_OLLAMA").contains(cfg.getModelType())
-                && StringUtils.hasText(cfg.getApiUrl());
     }
 
     private String buildPrompt(Orders order,
@@ -169,14 +171,19 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", cfg.getModelName());
         body.put("stream", false);
-        if (isOllamaNativeChatUrl(url)) {
+        if (LlmConfigSupport.isOllamaNativeChatUrl(url)) {
             body.put("think", false);
             body.put("format", "json");
         }
-        ArrayNode messages = body.putArray("messages");
-        ObjectNode user = messages.addObject();
-        user.put("role", "user");
-        user.put("content", prompt);
+        if (LlmConfigSupport.isOllamaNativeGenerateUrl(url)) {
+            body.put("prompt", prompt);
+            body.put("format", "json");
+        } else {
+            ArrayNode messages = body.putArray("messages");
+            ObjectNode user = messages.addObject();
+            user.put("role", "user");
+            user.put("content", prompt);
+        }
         if (coalLlmProperties.getMaxTokens() != null && coalLlmProperties.getMaxTokens() > 0) {
             body.put("max_tokens", coalLlmProperties.getMaxTokens());
         }
@@ -189,6 +196,8 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
             headers.setBearerAuth(cfg.getApiKey().trim());
         }
         HttpEntity<String> entity = new HttpEntity<>(objectMapper.writeValueAsString(body), headers);
+        log.info("Calling LLM candidate endpoint: modelConfigId={}, modelName={}, modelType={}, url={}",
+                cfg.getId(), cfg.getModelName(), cfg.getModelType(), LlmConfigSupport.endpointLabel(url));
         ResponseEntity<String> resp = llmRestTemplate.postForEntity(url, entity, String.class);
         if (!resp.getStatusCode().is2xxSuccessful() || resp.getBody() == null) {
             throw new IllegalStateException("bad status " + resp.getStatusCode());
@@ -265,10 +274,6 @@ public class AiBlendCandidateServiceImpl implements AiBlendCandidateService {
             return content;
         }
         return readText(root, "text");
-    }
-
-    private static boolean isOllamaNativeChatUrl(String url) {
-        return StringUtils.hasText(url) && url.contains("/api/chat");
     }
 
     private static String readText(JsonNode root, String field) {
