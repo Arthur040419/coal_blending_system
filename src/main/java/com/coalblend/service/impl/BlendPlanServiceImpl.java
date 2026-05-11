@@ -94,6 +94,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private static final int MAX_SHORTLIST_COALS = 5;
     private static final int MAX_RETURN_PLANS = 4;
     private static final int MAX_EVALUATED_CANDIDATES_RETURN = 30;
+    private static final int MIN_AI_CANDIDATES_DISPLAY = 3;
     private static final int TOTAL_RATIO_UNIT = 100;
 
     private final BlendPlanMapper blendPlanMapper;
@@ -376,10 +377,16 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         String experimentCode = StringUtils.hasText(dto.getExperimentCode())
                 ? dto.getExperimentCode().trim()
                 : buildExperimentCode(order, aiCandidateResult);
+        ExperimentStats experimentStats = buildExperimentStats(aiCandidateResult, aiDrafts, sorted,
+                feasible, risky, persistable.size());
         List<ScoredPlan> persistedPlans = persistable.isEmpty()
                 ? List.of()
                 : persistPlans(order, persistable, dto.getCreateBy(), typeMap, experimentCode,
-                aiCandidateResult == null ? null : aiCandidateResult.getModelName(), mode, generationConfig);
+                aiCandidateResult == null ? null : aiCandidateResult.getModelName(), mode, generationConfig,
+                experimentStats);
+        if (persistedPlans.isEmpty()) {
+            persistNoPlanExperimentRecord(experimentCode, order, aiCandidateResult, experimentStats, mode);
+        }
         ScoredPlan best = persistedPlans.isEmpty() ? null : persistedPlans.get(0);
         List<ScoredPlan> others = persistedPlans.size() <= 1 ? List.of() : persistedPlans.subList(1, persistedPlans.size());
 
@@ -432,7 +439,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         PlanWithDetailsVO recommended = best == null ? null : toVo(best.planId, typeMap);
         vo.setRecommendedPlan(recommended);
         vo.setCandidatePlans(others.stream().map(p -> toVo(p.planId, typeMap)).collect(Collectors.toList()));
-        vo.setAiEvaluatedCandidates(toCandidateEvaluationVos(aiDrafts, typeMap));
+        vo.setAiEvaluatedCandidates(toAiCandidateEvaluationVos(order, shortlisted, aiCandidateResult,
+                aiDrafts, runtimeConfig, typeMap));
         vo.setSystemEvaluatedCandidates(toCandidateEvaluationVos(systemDrafts, typeMap));
         vo.setMatchedRules(matchedRules);
         vo.setMatchedCases(matchedCases);
@@ -608,6 +616,9 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         }
         if (mode == RecommendationMode.RISK_REFERENCE) {
             return "当前订单没有完全可执行方案，系统返回风险最小参考方案。该方案存在库存余量偏低或质量安全余量不足，禁止直接执行。";
+        }
+        if (total == 0) {
+            return "本次未形成有效候选方案，可能原因是大模型未返回候选、返回格式不符合要求，或返回配比在候选物料、煤种数量、比例合计等校验中被过滤。系统没有保存不可执行方案。";
         }
         return "当前订单约束下无可执行方案，主要候选均存在硬约束违规。系统没有保存不可执行方案。";
     }
@@ -1230,7 +1241,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private List<ScoredPlan> persistPlans(Orders order, List<EvaluatedPlanDraft> drafts, Long createBy,
                                           Map<Long, CoalType> typeMap, String experimentCode,
                                           String aiModelName, RecommendationMode recommendationMode,
-                                          GenerationConfigVO generationConfig) {
+                                          GenerationConfigVO generationConfig,
+                                          ExperimentStats experimentStats) {
         long ts = System.currentTimeMillis();
         List<ScoredPlan> persisted = new ArrayList<>();
         for (int i = 0; i < drafts.size(); i++) {
@@ -1277,14 +1289,15 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 d.setPlanId(plan.getId());
                 blendPlanDetailMapper.insert(d);
             }
-            persistExperimentRecord(experimentCode, order, plan, draft, aiModelName);
+            persistExperimentRecord(experimentCode, order, plan, draft, aiModelName, experimentStats);
             persisted.add(new ScoredPlan(plan.getId(), score.getOverallScore(), draft));
         }
         return persisted;
     }
 
     private void persistExperimentRecord(String experimentCode, Orders order, BlendPlan plan,
-                                         EvaluatedPlanDraft draft, String aiModelName) {
+                                         EvaluatedPlanDraft draft, String aiModelName,
+                                         ExperimentStats experimentStats) {
         ConstraintResult constraint = draft.getConstraintResult();
         ScoreDetail score = draft.getScoreDetail();
         ExperimentRecord record = new ExperimentRecord();
@@ -1301,11 +1314,98 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         record.setCostScore(score.getCostScore());
         record.setInventoryScore(score.getStabilityScore());
         record.setFinalScore(score.getOverallScore());
+        fillExperimentStats(record, experimentStats);
+        record.setModelEffectScore(calculateModelEffectScore(score.getOverallScore(),
+                PlanDecisionStatus.FEASIBLE.name().equals(draft.getDecisionStatus()), experimentStats));
         record.setConstraintHit(buildExperimentConstraintJson(draft));
         record.setRiskWarning(StringUtils.hasText(draft.getRiskTip()) ? draft.getRiskTip() : constraint.riskLevel());
         record.setExplainText(buildExperimentExplainText(draft));
         record.setCreateTime(LocalDateTime.now());
         experimentRecordService.saveRecord(record);
+    }
+
+    private void persistNoPlanExperimentRecord(String experimentCode, Orders order,
+                                               AiBlendCandidateResult aiCandidateResult,
+                                               ExperimentStats experimentStats,
+                                               RecommendationMode mode) {
+        ExperimentRecord record = new ExperimentRecord();
+        record.setExperimentCode(experimentCode);
+        record.setOrderId(order.getId());
+        record.setModelName(aiCandidateResult != null && StringUtils.hasText(aiCandidateResult.getModelName())
+                ? aiCandidateResult.getModelName() : "ai-model");
+        record.setQualityScore(BigDecimal.ZERO);
+        record.setCostScore(BigDecimal.ZERO);
+        record.setInventoryScore(BigDecimal.ZERO);
+        record.setFinalScore(BigDecimal.ZERO);
+        fillExperimentStats(record, experimentStats);
+        record.setModelEffectScore(calculateModelEffectScore(BigDecimal.ZERO, false, experimentStats));
+        record.setConstraintHit("{"
+                + "\"candidateSource\":\"ai\","
+                + "\"feasible\":false,"
+                + "\"recommendationMode\":\"" + safeJson(mode == null ? null : mode.name()) + "\","
+                + "\"aiCandidatePlanCount\":" + (experimentStats == null ? 0 : experimentStats.aiCandidatePlanCount()) + ","
+                + "\"acceptedAiCandidateCount\":" + (experimentStats == null ? 0 : experimentStats.acceptedAiCandidateCount()) + ","
+                + "\"totalCandidateCount\":" + (experimentStats == null ? 0 : experimentStats.totalCandidateCount()) + ","
+                + "\"error\":\"" + safeJson(aiCandidateResult == null ? null : aiCandidateResult.getErrorMessage()) + "\""
+                + "}");
+        record.setRiskWarning(StringUtils.hasText(aiCandidateResult == null ? null : aiCandidateResult.getErrorMessage())
+                ? aiCandidateResult.getErrorMessage() : "本次实验未形成可落库候选方案。");
+        record.setExplainText("本次实验未形成可落库候选方案，已记录为模型生成失败或无有效候选样本。");
+        record.setCreateTime(LocalDateTime.now());
+        experimentRecordService.saveRecord(record);
+    }
+
+    private ExperimentStats buildExperimentStats(AiBlendCandidateResult aiCandidateResult,
+                                                 List<EvaluatedPlanDraft> aiDrafts,
+                                                 List<EvaluatedPlanDraft> sorted,
+                                                 List<EvaluatedPlanDraft> feasible,
+                                                 List<EvaluatedPlanDraft> risky,
+                                                 int generatedPlanCount) {
+        int aiPlanCount = aiCandidateResult == null || aiCandidateResult.getPlans() == null
+                ? 0 : aiCandidateResult.getPlans().size();
+        int acceptedAiCount = aiDrafts == null ? 0 : aiDrafts.size();
+        int total = sorted == null ? 0 : sorted.size();
+        int feasibleCount = feasible == null ? 0 : feasible.size();
+        int riskyCount = risky == null ? 0 : risky.size();
+        int infeasibleCount = Math.max(0, total - feasibleCount - riskyCount);
+        BigDecimal effectiveRate = aiPlanCount <= 0 ? BigDecimal.ZERO
+                : BigDecimal.valueOf(acceptedAiCount)
+                .divide(BigDecimal.valueOf(aiPlanCount), 4, RoundingMode.HALF_UP)
+                .min(BigDecimal.ONE);
+        int llmSuccess = aiPlanCount > 0 ? 1 : 0;
+        return new ExperimentStats(aiPlanCount, acceptedAiCount, total, feasibleCount, riskyCount,
+                infeasibleCount, generatedPlanCount, llmSuccess,
+                aiCandidateResult == null ? null : aiCandidateResult.getErrorMessage(), effectiveRate);
+    }
+
+    private void fillExperimentStats(ExperimentRecord record, ExperimentStats stats) {
+        if (record == null || stats == null) {
+            return;
+        }
+        record.setAiCandidatePlanCount(stats.aiCandidatePlanCount());
+        record.setAcceptedAiCandidateCount(stats.acceptedAiCandidateCount());
+        record.setTotalCandidateCount(stats.totalCandidateCount());
+        record.setFeasibleCandidateCount(stats.feasibleCandidateCount());
+        record.setRiskyCandidateCount(stats.riskyCandidateCount());
+        record.setInfeasibleCandidateCount(stats.infeasibleCandidateCount());
+        record.setGeneratedPlanCount(stats.generatedPlanCount());
+        record.setLlmSuccessFlag(stats.llmSuccessFlag());
+        record.setAiCandidateError(stats.aiCandidateError());
+        record.setEffectiveCandidateRate(stats.effectiveCandidateRate());
+    }
+
+    private BigDecimal calculateModelEffectScore(BigDecimal finalScore, boolean feasible, ExperimentStats stats) {
+        BigDecimal planScore = finalScore == null ? BigDecimal.ZERO : finalScore;
+        BigDecimal feasibilityScore = feasible ? new BigDecimal("100") : BigDecimal.ZERO;
+        BigDecimal effectiveScore = stats == null || stats.effectiveCandidateRate() == null
+                ? BigDecimal.ZERO : stats.effectiveCandidateRate().multiply(new BigDecimal("100"));
+        BigDecimal successScore = stats != null && stats.llmSuccessFlag() != null && stats.llmSuccessFlag() == 1
+                ? new BigDecimal("100") : BigDecimal.ZERO;
+        return planScore.multiply(new BigDecimal("0.50"))
+                .add(feasibilityScore.multiply(new BigDecimal("0.25")))
+                .add(effectiveScore.multiply(new BigDecimal("0.15")))
+                .add(successScore.multiply(new BigDecimal("0.10")))
+                .setScale(2, RoundingMode.HALF_UP);
     }
 
     private String resolveExperimentModelName(EvaluatedPlanDraft draft, String aiModelName) {
@@ -1393,6 +1493,193 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 .limit(MAX_EVALUATED_CANDIDATES_RETURN)
                 .map(d -> toCandidateEvaluationVo(d, typeMap))
                 .collect(Collectors.toList());
+    }
+
+    private List<CandidateEvaluationItemVO> toAiCandidateEvaluationVos(Orders order,
+                                                                       List<PlanCoalSnapshot> shortlisted,
+                                                                       AiBlendCandidateResult aiResult,
+                                                                       List<EvaluatedPlanDraft> aiDrafts,
+                                                                       BlendGenerationRuntimeConfig runtimeConfig,
+                                                                       Map<Long, CoalType> typeMap) {
+        List<CandidateEvaluationItemVO> rows = new ArrayList<>(toCandidateEvaluationVos(aiDrafts, typeMap));
+        if (rows.size() >= MIN_AI_CANDIDATES_DISPLAY || aiResult == null
+                || aiResult.getPlans() == null || aiResult.getPlans().isEmpty()) {
+            return rows;
+        }
+        int need = MIN_AI_CANDIDATES_DISPLAY - rows.size();
+        for (AiBlendCandidatePlan plan : aiResult.getPlans()) {
+            if (need <= 0) {
+                break;
+            }
+            if (toAiDraftInput(shortlisted, plan, runtimeConfig).snapshots().size() >= 2) {
+                continue;
+            }
+            rows.add(toRejectedAiCandidateVo(order, shortlisted, plan, runtimeConfig));
+            need--;
+        }
+        return rows;
+    }
+
+    private CandidateEvaluationItemVO toRejectedAiCandidateVo(Orders order, List<PlanCoalSnapshot> shortlisted,
+                                                              AiBlendCandidatePlan aiPlan,
+                                                              BlendGenerationRuntimeConfig runtimeConfig) {
+        List<DecisionProblemItemVO> problems = validateRejectedAiPlan(shortlisted, aiPlan, runtimeConfig);
+        CandidateEvaluationItemVO vo = new CandidateEvaluationItemVO();
+        vo.setCandidateSource("ai");
+        vo.setPlanName(StringUtils.hasText(aiPlan == null ? null : aiPlan.getPlanName())
+                ? aiPlan.getPlanName() : "AI候选方案");
+        vo.setAiCandidateReason(buildAiCandidateReason(aiPlan));
+        vo.setFeasibleFlag(0);
+        vo.setDecisionStatus(PlanDecisionStatus.INFEASIBLE.name());
+        vo.setDecisionStatusLabel(PlanDecisionStatus.INFEASIBLE.getLabel());
+        vo.setRiskLevel("high");
+        vo.setRiskTip(problems.stream()
+                .map(DecisionProblemItemVO::getMessage)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .collect(Collectors.joining("；")));
+        vo.setConstraintSummary(StringUtils.hasText(vo.getRiskTip())
+                ? "未通过基础校验：" + vo.getRiskTip()
+                : "未通过基础校验，无法进入评分。");
+        vo.setProblemItems(problems);
+        vo.setSuggestionItems(buildRejectedAiSuggestions(problems));
+        vo.setDetails(toRejectedAiPlanDetails(order, shortlisted, aiPlan));
+        return vo;
+    }
+
+    private List<DecisionProblemItemVO> validateRejectedAiPlan(List<PlanCoalSnapshot> shortlisted,
+                                                               AiBlendCandidatePlan aiPlan,
+                                                               BlendGenerationRuntimeConfig runtimeConfig) {
+        List<DecisionProblemItemVO> problems = new ArrayList<>();
+        int maxMaterialCount = runtimeConfig == null || runtimeConfig.getMaxMaterialCount() == null
+                ? 3 : runtimeConfig.getMaxMaterialCount();
+        List<AiBlendCandidateItem> items = aiPlan == null || aiPlan.getItems() == null ? List.of() : aiPlan.getItems();
+        if (items.size() < 2 || items.size() > maxMaterialCount) {
+            problems.add(problemItem(DecisionProblemType.MATERIAL_COUNT_INVALID,
+                    "AI返回配煤物料数为 " + items.size() + "，要求不少于 2 且不超过 " + maxMaterialCount + "。"));
+        }
+        Set<String> usedMaterialKeys = new HashSet<>();
+        Set<Long> usedCoalIds = new HashSet<>();
+        BigDecimal sum = BigDecimal.ZERO;
+        int matchedCount = 0;
+        for (AiBlendCandidateItem item : items) {
+            if (item == null || item.getRatio() == null || item.getRatio().compareTo(BigDecimal.ZERO) <= 0) {
+                problems.add(problemItem(DecisionProblemType.RATIO_SUM_INVALID,
+                        "AI返回物料存在空配比或非正配比，无法进入评分。"));
+                continue;
+            }
+            sum = sum.add(item.getRatio());
+            PlanCoalSnapshot snapshot = matchAiItem(shortlisted, item);
+            if (snapshot == null || snapshot.getCoalId() == null) {
+                problems.add(problemItem(DecisionProblemType.MATERIAL_COUNT_INVALID,
+                        "AI返回物料未命中本次候选池：coalId=" + item.getCoalId()
+                                + "，productBatchNo=" + (StringUtils.hasText(item.getProductBatchNo()) ? item.getProductBatchNo() : "—") + "。"));
+                continue;
+            }
+            String materialKey = StringUtils.hasText(snapshot.getProductBatchNo())
+                    ? "PB:" + snapshot.getProductBatchNo()
+                    : "COAL:" + snapshot.getCoalId();
+            if (usedMaterialKeys.contains(materialKey) || usedCoalIds.contains(snapshot.getCoalId())) {
+                problems.add(problemItem(DecisionProblemType.MATERIAL_COUNT_INVALID,
+                        "AI返回方案存在重复煤种或重复物料：" + materialKey + "。"));
+                continue;
+            }
+            usedMaterialKeys.add(materialKey);
+            usedCoalIds.add(snapshot.getCoalId());
+            matchedCount++;
+        }
+        if (matchedCount < 2) {
+            problems.add(problemItem(DecisionProblemType.MATERIAL_COUNT_INVALID,
+                    "AI返回方案命中候选池的有效物料数为 " + matchedCount + "，少于 2 个。"));
+        }
+        if (sum.compareTo(new BigDecimal("0.95")) < 0 || sum.compareTo(new BigDecimal("1.05")) > 0) {
+            problems.add(problemItem(DecisionProblemType.RATIO_SUM_INVALID,
+                    "AI返回配比合计为 " + fmt(sum) + "，不在 0.95 到 1.05 的容忍范围内。"));
+        }
+        if (problems.isEmpty()) {
+            problems.add(problemItem(DecisionProblemType.RULE_VIOLATION,
+                    "AI候选未通过基础校验，无法进入评分。"));
+        }
+        return distinctProblems(problems, true);
+    }
+
+    private DecisionProblemItemVO problemItem(DecisionProblemType type, String message) {
+        DecisionProblemItemVO item = new DecisionProblemItemVO();
+        item.setType(type.name());
+        item.setTypeLabel(type.getLabel());
+        item.setSeverity(DecisionProblemSeverity.BLOCKER.name());
+        item.setSeverityLabel(DecisionProblemSeverity.BLOCKER.getLabel());
+        item.setFieldName("aiCandidate");
+        item.setMessage(message);
+        return item;
+    }
+
+    private List<DecisionSuggestionItemVO> buildRejectedAiSuggestions(List<DecisionProblemItemVO> problems) {
+        List<DecisionSuggestionItemVO> suggestions = new ArrayList<>();
+        Set<String> types = problems == null ? Set.of() : problems.stream()
+                .map(DecisionProblemItemVO::getType)
+                .collect(Collectors.toSet());
+        if (types.contains(DecisionProblemType.RATIO_SUM_INVALID.name())) {
+            DecisionSuggestionItemVO item = new DecisionSuggestionItemVO();
+            item.setType(DecisionProblemType.RATIO_SUM_INVALID.name());
+            item.setAction("REGENERATE_RATIO");
+            item.setMessage("要求大模型重新输出配比合计为 1 的候选方案，且每个物料配比必须为正数。");
+            item.setPriority(1);
+            suggestions.add(item);
+        }
+        if (types.contains(DecisionProblemType.MATERIAL_COUNT_INVALID.name())) {
+            DecisionSuggestionItemVO item = new DecisionSuggestionItemVO();
+            item.setType(DecisionProblemType.MATERIAL_COUNT_INVALID.name());
+            item.setAction("RESTRICT_MATERIAL_SCOPE");
+            item.setMessage("要求大模型只能使用本次候选池中的 coalId 和 productBatchNo，且配煤物料数保持在 2 到 3 个。");
+            item.setPriority(2);
+            suggestions.add(item);
+        }
+        if (suggestions.isEmpty()) {
+            DecisionSuggestionItemVO item = new DecisionSuggestionItemVO();
+            item.setType(DecisionProblemType.RULE_VIOLATION.name());
+            item.setAction("REGENERATE_CANDIDATE");
+            item.setMessage("重新生成候选方案，并检查大模型输出是否满足系统基础校验规则。");
+            item.setPriority(3);
+            suggestions.add(item);
+        }
+        return suggestions;
+    }
+
+    private List<PlanDetailVO> toRejectedAiPlanDetails(Orders order, List<PlanCoalSnapshot> shortlisted,
+                                                       AiBlendCandidatePlan aiPlan) {
+        if (aiPlan == null || aiPlan.getItems() == null || aiPlan.getItems().isEmpty()) {
+            return List.of();
+        }
+        List<PlanDetailVO> details = new ArrayList<>();
+        Set<String> used = new HashSet<>();
+        for (AiBlendCandidateItem item : aiPlan.getItems()) {
+            PlanCoalSnapshot snapshot = matchAiItem(shortlisted, item);
+            if (snapshot == null) {
+                continue;
+            }
+            String key = StringUtils.hasText(snapshot.getProductBatchNo())
+                    ? snapshot.getProductBatchNo()
+                    : String.valueOf(snapshot.getCoalId());
+            if (!used.add(key)) {
+                continue;
+            }
+            PlanDetailVO row = new PlanDetailVO();
+            row.setCoalId(snapshot.getCoalId());
+            row.setProductBatchId(snapshot.getProductBatchId());
+            row.setProductBatchNo(snapshot.getProductBatchNo());
+            row.setInventoryId(snapshot.getInventory() == null ? null : snapshot.getInventory().getId());
+            row.setQualitySnapshotJson(snapshot.getQualitySnapshotJson());
+            row.setCoalName(snapshot.getType() == null ? null : snapshot.getType().getCoalName());
+            row.setBlendRatio(item.getRatio());
+            if (order != null && order.getDemandQuantity() != null && item.getRatio() != null) {
+                row.setUseQuantity(order.getDemandQuantity().multiply(item.getRatio()).setScale(2, RoundingMode.HALF_UP));
+            }
+            row.setUnitCost(snapshot.getType() == null ? null : snapshot.getType().getPurchasePrice());
+            row.setRemark(StringUtils.hasText(item.getReason()) ? item.getReason() : "AI返回候选物料，未通过基础校验。");
+            details.add(row);
+        }
+        return details;
     }
 
     private CandidateEvaluationItemVO toCandidateEvaluationVo(EvaluatedPlanDraft draft, Map<Long, CoalType> typeMap) {
@@ -1560,6 +1847,18 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     }
 
     private record ScoredPlan(Long planId, BigDecimal overall, EvaluatedPlanDraft draft) {
+    }
+
+    private record ExperimentStats(Integer aiCandidatePlanCount,
+                                   Integer acceptedAiCandidateCount,
+                                   Integer totalCandidateCount,
+                                   Integer feasibleCandidateCount,
+                                   Integer riskyCandidateCount,
+                                   Integer infeasibleCandidateCount,
+                                   Integer generatedPlanCount,
+                                   Integer llmSuccessFlag,
+                                   String aiCandidateError,
+                                   BigDecimal effectiveCandidateRate) {
     }
 
 }

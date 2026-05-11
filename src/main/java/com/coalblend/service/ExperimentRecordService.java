@@ -2,6 +2,7 @@ package com.coalblend.service;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.coalblend.entity.ExperimentRecord;
+import com.coalblend.vo.experiment.ExperimentModelEffectVO;
 import com.coalblend.vo.experiment.ExperimentRadarVO;
 
 import java.util.List;
@@ -16,4 +17,6 @@ public interface ExperimentRecordService {
     List<ExperimentRecord> listByOrder(Long orderId);
 
     ExperimentRadarVO radar(String experimentCode, Long orderId, String modelName);
+
+    List<ExperimentModelEffectVO> modelEffect(String modelName, Long orderId);
 }

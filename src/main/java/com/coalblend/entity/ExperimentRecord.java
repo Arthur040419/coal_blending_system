@@ -27,6 +27,17 @@ public class ExperimentRecord {
     private BigDecimal costScore;
     private BigDecimal inventoryScore;
     private BigDecimal finalScore;
+    private Integer aiCandidatePlanCount;
+    private Integer acceptedAiCandidateCount;
+    private Integer totalCandidateCount;
+    private Integer feasibleCandidateCount;
+    private Integer riskyCandidateCount;
+    private Integer infeasibleCandidateCount;
+    private Integer generatedPlanCount;
+    private Integer llmSuccessFlag;
+    private String aiCandidateError;
+    private BigDecimal effectiveCandidateRate;
+    private BigDecimal modelEffectScore;
     private String constraintHit;
     private String riskWarning;
     private String explainText;

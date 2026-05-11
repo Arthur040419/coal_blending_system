@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.coalblend.common.result.Result;
 import com.coalblend.entity.ExperimentRecord;
 import com.coalblend.service.ExperimentRecordService;
+import com.coalblend.vo.experiment.ExperimentModelEffectVO;
 import com.coalblend.vo.experiment.ExperimentRadarVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -43,5 +44,12 @@ public class ExperimentRecordController {
             @RequestParam(required = false) Long orderId,
             @RequestParam(required = false) String modelName) {
         return Result.ok(experimentRecordService.radar(experimentCode, orderId, modelName));
+    }
+
+    @GetMapping("/model-effect")
+    public Result<List<ExperimentModelEffectVO>> modelEffect(
+            @RequestParam(required = false) String modelName,
+            @RequestParam(required = false) Long orderId) {
+        return Result.ok(experimentRecordService.modelEffect(modelName, orderId));
     }
 }
