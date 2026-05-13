@@ -21,6 +21,8 @@ public class BlendGenerateResultVO {
     private Map<String, Object> constraints = new LinkedHashMap<>();
     private PlanWithDetailsVO recommendedPlan;
     private List<PlanWithDetailsVO> candidatePlans;
+    /** 本次配煤生成时进入搜索与大模型提示词的候选物料短名单 */
+    private List<CandidateMaterialVO> candidateMaterials;
     /** 本次生成过程中 AI 候选方案的完整评分结果（未必全部落库） */
     private List<CandidateEvaluationItemVO> aiEvaluatedCandidates;
     /** 本次生成过程中系统枚举候选方案的完整评分结果（未必全部落库） */

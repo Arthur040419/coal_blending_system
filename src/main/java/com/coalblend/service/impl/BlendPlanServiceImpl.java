@@ -55,6 +55,7 @@ import com.coalblend.vo.AiExplainResultVO;
 import com.coalblend.vo.blend.BlendPlanExecuteResultVO;
 import com.coalblend.vo.blend.BlendGenerateResultVO;
 import com.coalblend.vo.blend.CandidateEvaluationItemVO;
+import com.coalblend.vo.blend.CandidateMaterialVO;
 import com.coalblend.vo.blend.DecisionProblemItemVO;
 import com.coalblend.vo.blend.DecisionSuggestionItemVO;
 import com.coalblend.vo.blend.GenerationConfigVO;
@@ -439,6 +440,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         PlanWithDetailsVO recommended = best == null ? null : toVo(best.planId, typeMap);
         vo.setRecommendedPlan(recommended);
         vo.setCandidatePlans(others.stream().map(p -> toVo(p.planId, typeMap)).collect(Collectors.toList()));
+        vo.setCandidateMaterials(toCandidateMaterialVos(shortlisted, candidateScope));
         vo.setAiEvaluatedCandidates(toAiCandidateEvaluationVos(order, shortlisted, aiCandidateResult,
                 aiDrafts, runtimeConfig, typeMap));
         vo.setSystemEvaluatedCandidates(toCandidateEvaluationVos(systemDrafts, typeMap));
@@ -1493,6 +1495,65 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 .limit(MAX_EVALUATED_CANDIDATES_RETURN)
                 .map(d -> toCandidateEvaluationVo(d, typeMap))
                 .collect(Collectors.toList());
+    }
+
+    private List<CandidateMaterialVO> toCandidateMaterialVos(List<PlanCoalSnapshot> shortlisted,
+                                                             String candidateScope) {
+        if (shortlisted == null || shortlisted.isEmpty()) {
+            return List.of();
+        }
+        List<CandidateMaterialVO> rows = new ArrayList<>();
+        for (int i = 0; i < shortlisted.size(); i++) {
+            PlanCoalSnapshot snapshot = shortlisted.get(i);
+            CandidateMaterialVO row = new CandidateMaterialVO();
+            row.setShortlistRank(i + 1);
+            row.setCandidateScope(candidateScope);
+            row.setMaterialKey(StringUtils.hasText(snapshot.getProductBatchNo())
+                    ? "PB:" + snapshot.getProductBatchNo()
+                    : "COAL:" + snapshot.getCoalId());
+
+            CoalType type = snapshot.getType();
+            if (type != null) {
+                row.setCoalId(type.getId());
+                row.setCoalCode(type.getCoalCode());
+                row.setCoalName(type.getCoalName());
+                row.setCoalCategory(type.getCoalCategory());
+                row.setSourceArea(type.getSourceArea());
+                row.setPurchasePrice(type.getPurchasePrice());
+            } else {
+                row.setCoalId(snapshot.getCoalId());
+            }
+            row.setProductBatchId(snapshot.getProductBatchId());
+            row.setProductBatchNo(snapshot.getProductBatchNo());
+            row.setProductBatchName(snapshot.getProductBatchName());
+
+            Inventory inventory = snapshot.getInventory();
+            if (inventory != null) {
+                row.setInventoryId(inventory.getId());
+                row.setWarehouseCode(inventory.getWarehouseCode());
+                row.setMaterialStage(inventory.getMaterialStage());
+                row.setRawBatchNo(inventory.getRawBatchNo());
+                row.setStockQuantity(inventory.getStockQuantity());
+                row.setAvailableQuantity(inventory.getAvailableQuantity());
+                row.setLockedQuantity(inventory.getLockedQuantity());
+            }
+
+            CoalQuality quality = snapshot.getQuality();
+            if (quality != null) {
+                row.setQualityId(quality.getId());
+                row.setQualityBatchNo(quality.getBatchNo());
+                row.setSampleStage(quality.getSampleStage());
+                row.setRelatedBatchNo(quality.getRelatedBatchNo());
+                row.setAshContent(quality.getAshContent());
+                row.setSulfurContent(quality.getSulfurContent());
+                row.setMoistureContent(quality.getMoistureContent());
+                row.setVolatileContent(quality.getVolatileContent());
+                row.setCalorificValue(quality.getCalorificValue());
+                row.setFixedCarbon(quality.getFixedCarbon());
+            }
+            rows.add(row);
+        }
+        return rows;
     }
 
     private List<CandidateEvaluationItemVO> toAiCandidateEvaluationVos(Orders order,
