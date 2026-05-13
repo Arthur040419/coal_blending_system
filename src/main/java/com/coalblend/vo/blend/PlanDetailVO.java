@@ -10,6 +10,7 @@ public class PlanDetailVO {
     private Long id;
     private Long planId;
     private Long coalId;
+    private String coalCode;
     private String coalName;
     private Long productBatchId;
     private String productBatchNo;

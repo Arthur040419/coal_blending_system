@@ -384,7 +384,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 ? List.of()
                 : persistPlans(order, persistable, dto.getCreateBy(), typeMap, experimentCode,
                 aiCandidateResult == null ? null : aiCandidateResult.getModelName(), mode, generationConfig,
-                experimentStats);
+                experimentStats, toCandidateMaterialVos(shortlisted, candidateScope),
+                matchedRules, matchedCases, ragRetrieveResult);
         if (persistedPlans.isEmpty()) {
             persistNoPlanExperimentRecord(experimentCode, order, aiCandidateResult, experimentStats, mode);
         }
@@ -1244,7 +1245,11 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                                           Map<Long, CoalType> typeMap, String experimentCode,
                                           String aiModelName, RecommendationMode recommendationMode,
                                           GenerationConfigVO generationConfig,
-                                          ExperimentStats experimentStats) {
+                                          ExperimentStats experimentStats,
+                                          List<CandidateMaterialVO> candidateMaterials,
+                                          List<MatchedRuleVO> matchedRules,
+                                          List<MatchedCaseVO> matchedCases,
+                                          RagRetrieveResultVO ragRetrieveResult) {
         long ts = System.currentTimeMillis();
         List<ScoredPlan> persisted = new ArrayList<>();
         for (int i = 0; i < drafts.size(); i++) {
@@ -1281,6 +1286,10 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             plan.setProblemItemsJson(toJson(draft.getProblemItems()));
             plan.setSuggestionItemsJson(toJson(draft.getSuggestionItems()));
             plan.setGenerationConfigJson(toJson(generationConfig));
+            plan.setCandidateMaterialsJson(toJson(candidateMaterials == null ? List.of() : candidateMaterials));
+            plan.setMatchedRulesJson(toJson(matchedRules == null ? List.of() : matchedRules));
+            plan.setMatchedCasesJson(toJson(matchedCases == null ? List.of() : matchedCases));
+            plan.setRagRetrieveResultJson(toJson(ragRetrieveResult));
             if ("ai".equalsIgnoreCase(plan.getCandidateSource()) && StringUtils.hasText(aiModelName)) {
                 plan.setAiModelName(aiModelName);
                 plan.setAiGenerateFlag(1);
@@ -1732,6 +1741,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             row.setInventoryId(snapshot.getInventory() == null ? null : snapshot.getInventory().getId());
             row.setQualitySnapshotJson(snapshot.getQualitySnapshotJson());
             row.setCoalName(snapshot.getType() == null ? null : snapshot.getType().getCoalName());
+            row.setCoalCode(snapshot.getType() == null ? null : snapshot.getType().getCoalCode());
             row.setBlendRatio(item.getRatio());
             if (order != null && order.getDemandQuantity() != null && item.getRatio() != null) {
                 row.setUseQuantity(order.getDemandQuantity().multiply(item.getRatio()).setScale(2, RoundingMode.HALF_UP));
@@ -1781,6 +1791,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             row.setQualitySnapshotJson(d.getQualitySnapshotJson());
             CoalType t = typeMap.get(d.getCoalId());
             row.setCoalName(t == null ? null : t.getCoalName());
+            row.setCoalCode(t == null ? null : t.getCoalCode());
             row.setBlendRatio(d.getBlendRatio());
             row.setUseQuantity(d.getUseQuantity());
             row.setPredictedAsh(d.getPredictedAsh());
@@ -1887,6 +1898,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             v.setQualitySnapshotJson(d.getQualitySnapshotJson());
             CoalType t = typeMap.get(d.getCoalId());
             v.setCoalName(t == null ? null : t.getCoalName());
+            v.setCoalCode(t == null ? null : t.getCoalCode());
             v.setBlendRatio(d.getBlendRatio());
             v.setUseQuantity(d.getUseQuantity());
             v.setPredictedAsh(d.getPredictedAsh());

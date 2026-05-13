@@ -69,6 +69,10 @@ public class BlendPlan {
     private String problemItemsJson;
     private String suggestionItemsJson;
     private String generationConfigJson;
+    private String candidateMaterialsJson;
+    private String matchedRulesJson;
+    private String matchedCasesJson;
+    private String ragRetrieveResultJson;
     @TableField(exist = false)
     private List<DecisionProblemItemVO> problemItems;
     @TableField(exist = false)

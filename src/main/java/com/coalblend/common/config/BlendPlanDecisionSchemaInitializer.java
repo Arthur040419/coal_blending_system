@@ -32,6 +32,10 @@ public class BlendPlanDecisionSchemaInitializer implements ApplicationRunner {
         columns.put("problem_items_json", "JSON NULL COMMENT '结构化问题项'");
         columns.put("suggestion_items_json", "JSON NULL COMMENT '结构化建议项'");
         columns.put("generation_config_json", "JSON NULL COMMENT '生成参数快照'");
+        columns.put("candidate_materials_json", "JSON NULL COMMENT '本次生成候选物料短名单快照'");
+        columns.put("matched_rules_json", "JSON NULL COMMENT '本次生成命中规则快照'");
+        columns.put("matched_cases_json", "JSON NULL COMMENT '本次生成参考案例快照'");
+        columns.put("rag_retrieve_result_json", "JSON NULL COMMENT '本次生成RAG检索结果快照'");
 
         for (Map.Entry<String, String> entry : columns.entrySet()) {
             ensureColumn(entry.getKey(), entry.getValue());
