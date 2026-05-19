@@ -1811,8 +1811,11 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     }
 
     private boolean isExecutableDecision(BlendPlan plan) {
-        return plan == null || !StringUtils.hasText(plan.getDecisionStatus())
-                || PlanDecisionStatus.FEASIBLE.name().equals(plan.getDecisionStatus());
+        if (plan == null) {
+            return true;
+        }
+        PlanDecisionStatus status = parseDecisionStatus(plan);
+        return status == PlanDecisionStatus.FEASIBLE;
     }
 
     private String toJson(Object value) {
@@ -1827,7 +1830,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         if (plan == null) {
             return;
         }
-        PlanDecisionStatus status = parseDecisionStatus(plan.getDecisionStatus(), plan.getFeasibleFlag());
+        PlanDecisionStatus status = parseDecisionStatus(plan);
         if (status != null) {
             plan.setDecisionStatus(status.name());
             plan.setDecisionStatusLabel(status.getLabel());
@@ -1843,7 +1846,11 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         plan.setSuggestionItems(readSuggestionItems(plan.getSuggestionItemsJson()));
     }
 
-    private PlanDecisionStatus parseDecisionStatus(String value, Integer feasibleFlag) {
+    private PlanDecisionStatus parseDecisionStatus(BlendPlan plan) {
+        if (plan == null) {
+            return null;
+        }
+        String value = plan.getDecisionStatus();
         if (StringUtils.hasText(value)) {
             try {
                 return PlanDecisionStatus.valueOf(value);
@@ -1851,10 +1858,67 @@ public class BlendPlanServiceImpl implements BlendPlanService {
                 return null;
             }
         }
-        if (feasibleFlag == null) {
+        PlanDecisionStatus summaryStatus = parseConstraintSummaryStatus(plan.getConstraintSummary());
+        if (summaryStatus != null) {
+            return summaryStatus;
+        }
+        if ("high".equalsIgnoreCase(plan.getRiskLevel())) {
+            return PlanDecisionStatus.INFEASIBLE;
+        }
+        if ("medium".equalsIgnoreCase(plan.getRiskLevel())) {
+            return PlanDecisionStatus.RISKY;
+        }
+        if ("low".equalsIgnoreCase(plan.getRiskLevel())) {
+            return PlanDecisionStatus.FEASIBLE;
+        }
+        if (plan.getFeasibleFlag() == null) {
             return null;
         }
-        return feasibleFlag == 0 ? PlanDecisionStatus.INFEASIBLE : PlanDecisionStatus.FEASIBLE;
+        return plan.getFeasibleFlag() == 0 ? PlanDecisionStatus.INFEASIBLE : PlanDecisionStatus.FEASIBLE;
+    }
+
+    private PlanDecisionStatus parseConstraintSummaryStatus(String summary) {
+        if (!StringUtils.hasText(summary)) {
+            return null;
+        }
+        if (summary.contains("不可行") || summarySectionHasContent(summary, "违反项")) {
+            return PlanDecisionStatus.INFEASIBLE;
+        }
+        if (summarySectionHasContent(summary, "风险提示")) {
+            return PlanDecisionStatus.RISKY;
+        }
+        if (summary.contains("可行性：可行") || summary.contains("可行性:可行")) {
+            return PlanDecisionStatus.FEASIBLE;
+        }
+        return null;
+    }
+
+    private boolean summarySectionHasContent(String summary, String label) {
+        String value = summarySectionValue(summary, label + "：");
+        if (value == null) {
+            value = summarySectionValue(summary, label + ":");
+        }
+        return StringUtils.hasText(value)
+                && !"无".equals(value)
+                && !"—".equals(value)
+                && !"-".equals(value)
+                && !"暂无".equals(value);
+    }
+
+    private String summarySectionValue(String summary, String marker) {
+        int start = summary.indexOf(marker);
+        if (start < 0) {
+            return null;
+        }
+        String rest = summary.substring(start + marker.length());
+        int end = rest.length();
+        for (String sep : List.of("；", ";", "。")) {
+            int idx = rest.indexOf(sep);
+            if (idx >= 0 && idx < end) {
+                end = idx;
+            }
+        }
+        return rest.substring(0, end).trim();
     }
 
     private List<DecisionProblemItemVO> readProblemItems(String json) {
