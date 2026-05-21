@@ -1500,10 +1500,12 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         if (drafts == null || drafts.isEmpty()) {
             return List.of();
         }
-        return drafts.stream()
-                .limit(MAX_EVALUATED_CANDIDATES_RETURN)
-                .map(d -> toCandidateEvaluationVo(d, typeMap))
-                .collect(Collectors.toList());
+        List<CandidateEvaluationItemVO> rows = new ArrayList<>();
+        int limit = Math.min(MAX_EVALUATED_CANDIDATES_RETURN, drafts.size());
+        for (int i = 0; i < limit; i++) {
+            rows.add(toCandidateEvaluationVo(drafts.get(i), typeMap, i + 1));
+        }
+        return rows;
     }
 
     private List<CandidateMaterialVO> toCandidateMaterialVos(List<PlanCoalSnapshot> shortlisted,
@@ -1584,7 +1586,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             if (toAiDraftInput(shortlisted, plan, runtimeConfig).snapshots().size() >= 2) {
                 continue;
             }
-            rows.add(toRejectedAiCandidateVo(order, shortlisted, plan, runtimeConfig));
+            rows.add(toRejectedAiCandidateVo(order, shortlisted, plan, runtimeConfig, rows.size() + 1));
             need--;
         }
         return rows;
@@ -1592,10 +1594,12 @@ public class BlendPlanServiceImpl implements BlendPlanService {
 
     private CandidateEvaluationItemVO toRejectedAiCandidateVo(Orders order, List<PlanCoalSnapshot> shortlisted,
                                                               AiBlendCandidatePlan aiPlan,
-                                                              BlendGenerationRuntimeConfig runtimeConfig) {
+                                                              BlendGenerationRuntimeConfig runtimeConfig,
+                                                              int displayIndex) {
         List<DecisionProblemItemVO> problems = validateRejectedAiPlan(shortlisted, aiPlan, runtimeConfig);
         CandidateEvaluationItemVO vo = new CandidateEvaluationItemVO();
         vo.setCandidateSource("ai");
+        vo.setPlanCode(candidateDisplayCode("ai", displayIndex));
         vo.setPlanName(StringUtils.hasText(aiPlan == null ? null : aiPlan.getPlanName())
                 ? aiPlan.getPlanName() : "AI候选方案");
         vo.setAiCandidateReason(buildAiCandidateReason(aiPlan));
@@ -1753,11 +1757,13 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         return details;
     }
 
-    private CandidateEvaluationItemVO toCandidateEvaluationVo(EvaluatedPlanDraft draft, Map<Long, CoalType> typeMap) {
+    private CandidateEvaluationItemVO toCandidateEvaluationVo(EvaluatedPlanDraft draft, Map<Long, CoalType> typeMap,
+                                                              int displayIndex) {
         ConstraintResult constraint = draft.getConstraintResult();
         ScoreDetail score = draft.getScoreDetail();
         CandidateEvaluationItemVO vo = new CandidateEvaluationItemVO();
         vo.setCandidateSource(StringUtils.hasText(draft.getCandidateSource()) ? draft.getCandidateSource() : "system");
+        vo.setPlanCode(candidateDisplayCode(vo.getCandidateSource(), displayIndex));
         vo.setPlanName("ai".equals(vo.getCandidateSource()) ? "AI候选方案" : "系统枚举方案");
         vo.setAiCandidateReason(draft.getAiCandidateReason());
         vo.setTotalCost(draft.getTotalCost());
@@ -1804,6 +1810,11 @@ public class BlendPlanServiceImpl implements BlendPlanService {
             return row;
         }).collect(Collectors.toList()));
         return vo;
+    }
+
+    private String candidateDisplayCode(String source, int index) {
+        String prefix = "ai".equalsIgnoreCase(source) ? "AI" : "SYS";
+        return prefix + "-" + String.format("%03d", Math.max(index, 1));
     }
 
     private String fmt(BigDecimal value) {
@@ -1881,7 +1892,8 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         if (!StringUtils.hasText(summary)) {
             return null;
         }
-        if (summary.contains("不可行") || summarySectionHasContent(summary, "违反项")) {
+        if (summary.contains("可行性：不可行") || summary.contains("可行性:不可行")
+                || summarySectionHasContent(summary, "违反项")) {
             return PlanDecisionStatus.INFEASIBLE;
         }
         if (summarySectionHasContent(summary, "风险提示")) {

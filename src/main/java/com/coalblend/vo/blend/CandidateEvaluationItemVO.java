@@ -10,6 +10,7 @@ import java.util.List;
 public class CandidateEvaluationItemVO {
 
     private String candidateSource;
+    private String planCode;
     private String planName;
     private String aiCandidateReason;
     private BigDecimal totalCost;
