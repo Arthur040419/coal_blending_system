@@ -34,6 +34,7 @@ import com.coalblend.service.chain.BatchLineageService;
 import com.coalblend.service.chain.BatchNoGenerator;
 import com.coalblend.service.intelligent.AiBlendCandidateService;
 import com.coalblend.service.intelligent.BlendGenerationConfigResolver;
+import com.coalblend.service.intelligent.HumanExperienceBaselineService;
 import com.coalblend.service.intelligent.ModelInferenceService;
 import com.coalblend.service.intelligent.ParetoRankService;
 import com.coalblend.service.intelligent.PlanDecisionService;
@@ -44,6 +45,7 @@ import com.coalblend.service.intelligent.model.AiBlendCandidateResult;
 import com.coalblend.service.intelligent.model.BlendGenerationRuntimeConfig;
 import com.coalblend.service.intelligent.model.ConstraintResult;
 import com.coalblend.service.intelligent.model.EvaluatedPlanDraft;
+import com.coalblend.service.intelligent.model.HumanExperiencePlan;
 import com.coalblend.service.intelligent.model.PlanCoalSnapshot;
 import com.coalblend.service.intelligent.model.ScoreDetail;
 import com.coalblend.service.knowledge.CaseMatchService;
@@ -109,6 +111,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
     private final CaseMatchService caseMatchService;
     private final KnowledgeAssembleService knowledgeAssembleService;
     private final AiBlendCandidateService aiBlendCandidateService;
+    private final HumanExperienceBaselineService humanExperienceBaselineService;
     private final ModelInferenceService modelInferenceService;
     private final PlanScoreService planScoreService;
     private final RagRetrieveService ragRetrieveService;
@@ -341,6 +344,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
 
         AiBlendCandidateResult aiCandidateResult = aiBlendCandidateService.generateCandidates(
                 order, shortlisted, matchedRules, matchedCases, ragRetrieveResult, candidateScope, dto.getModelConfigId());
+        HumanExperiencePlan humanBaselinePlan = humanExperienceBaselineService.generate(order, shortlisted);
         List<EvaluatedPlanDraft> aiDrafts = buildAiCandidateDrafts(order, shortlisted, aiCandidateResult, runtimeConfig);
         List<EvaluatedPlanDraft> systemDrafts = coalBlendProperties.isEnableSystemEnumeration()
                 ? buildCandidateDrafts(order, shortlisted, runtimeConfig)
@@ -415,6 +419,16 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         }
         constraints.put("totalCandidateCount", sorted.size());
         constraints.put("feasiblePlanCount", feasible.size());
+        if (humanBaselinePlan != null) {
+            Map<String, Object> baselineSummary = new LinkedHashMap<>();
+            baselineSummary.put("generated", humanBaselinePlan.isGenerated());
+            baselineSummary.put("status", humanBaselinePlan.getStatus());
+            baselineSummary.put("hardConstraintsPassed", humanBaselinePlan.isHardConstraintsPassed());
+            baselineSummary.put("costPerTon", humanBaselinePlan.getCostPerTon());
+            baselineSummary.put("totalCost", humanBaselinePlan.getTotalCost());
+            baselineSummary.put("violations", humanBaselinePlan.getViolations());
+            constraints.put("humanBaseline", baselineSummary);
+        }
         constraints.put("riskyPlanCount", risky.size());
         constraints.put("infeasiblePlanCount", sorted.stream()
                 .filter(d -> PlanDecisionStatus.INFEASIBLE.name().equals(d.getDecisionStatus())).count());
@@ -448,6 +462,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
         vo.setMatchedRules(matchedRules);
         vo.setMatchedCases(matchedCases);
         vo.setAiCandidateResult(aiCandidateResult);
+        vo.setHumanBaselinePlan(humanBaselinePlan);
         vo.setRagRetrieveResult(ragRetrieveResult);
         if (best != null && recommended != null) {
             KnowledgeContextDTO knowledgeContext = knowledgeAssembleService.assemble(

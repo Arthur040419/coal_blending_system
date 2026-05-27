@@ -8,6 +8,7 @@ import com.coalblend.vo.knowledge.MatchedRuleVO;
 import com.coalblend.vo.AiExplainResultVO;
 import com.coalblend.vo.rag.RagRetrieveResultVO;
 import com.coalblend.service.intelligent.model.AiBlendCandidateResult;
+import com.coalblend.service.intelligent.model.HumanExperiencePlan;
 import lombok.Data;
 
 import java.util.LinkedHashMap;
@@ -39,6 +40,8 @@ public class BlendGenerateResultVO {
     private RagRetrieveResultVO ragRetrieveResult;
     /** 大模型参与候选方案生成结果 */
     private AiBlendCandidateResult aiCandidateResult;
+    /** 人工经验配煤基线对照方案（仅作对照展示，不参与系统主决策与持久化） */
+    private HumanExperiencePlan humanBaselinePlan;
     /** 大模型基于 RAG 上下文生成的解释结果 */
     private AiExplainResultVO ragExplanation;
     private String explainSummary;
