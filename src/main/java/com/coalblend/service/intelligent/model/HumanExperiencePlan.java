@@ -20,7 +20,14 @@ public class HumanExperiencePlan {
     /** 生成失败时的原因 */
     private String errorMessage;
 
-    /** 选中物料明细（按经验综合分降序，固定取前 2 名） */
+    /** 最终采用的物料数量 N（2 或 3），由择优逻辑决定 */
+    private Integer selectedN;
+    /** 方案级综合分（按 0.4×热值+0.2×灰+0.2×硫+0.2×价 对加权后的方案指标计算） */
+    private BigDecimal planScore;
+    /** 被弃选备选方案的择优摘要（如"N=3 候选综合分 21.06，低于 N=2 候选 23.84"） */
+    private String alternativeSummary;
+
+    /** 选中物料明细（按经验综合分降序，N=2 取前 2 名按 60/40，N=3 取前 3 名按 50/30/20） */
     private List<HumanExperienceItem> items = new ArrayList<>();
 
     /** 加权配煤指标 */

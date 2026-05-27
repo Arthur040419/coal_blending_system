@@ -15,9 +15,13 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Function;
 
 /**
  * 人工经验配煤基线服务实现（V1）。法则定义见 {@link HumanExperienceBaselineService}。
+ * <p>
+ * 为提高基线对真实经验决策的逼真度，V1 同时生成 N=2（60%/40%）与 N=3（50%/30%/20%）
+ * 两组候选方案，按"硬约束可行优先 + 方案级综合分更高"原则择优，最终仅输出一个方案。
  */
 @Slf4j
 @Service
@@ -29,9 +33,14 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
     private static final BigDecimal W_SULFUR = new BigDecimal("0.20");
     private static final BigDecimal W_PRICE = new BigDecimal("0.20");
 
-    /** Step 2 经验配比：固定 60% 主煤 + 40% 辅煤 */
-    private static final BigDecimal RATIO_PRIMARY = new BigDecimal("0.60");
-    private static final BigDecimal RATIO_SECONDARY = new BigDecimal("0.40");
+    /** Step 2 经验配比：N=2 → 60% / 40%；N=3 → 50% / 30% / 20% */
+    private static final List<BigDecimal> RATIOS_N2 = List.of(
+            new BigDecimal("0.60"),
+            new BigDecimal("0.40"));
+    private static final List<BigDecimal> RATIOS_N3 = List.of(
+            new BigDecimal("0.50"),
+            new BigDecimal("0.30"),
+            new BigDecimal("0.20"));
 
     private static final int SCALE_RATIO = 4;
     private static final int SCALE_QUALITY = 4;
@@ -40,14 +49,14 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
 
     @Override
     public HumanExperiencePlan generate(Orders order, List<PlanCoalSnapshot> candidates) {
-        HumanExperiencePlan plan = new HumanExperiencePlan();
-        plan.setDemandQuantity(order == null ? null : order.getDemandQuantity());
+        HumanExperiencePlan failurePlan = new HumanExperiencePlan();
+        failurePlan.setDemandQuantity(order == null ? null : order.getDemandQuantity());
 
         if (order == null || candidates == null || candidates.size() < 2) {
-            plan.setGenerated(false);
-            plan.setStatus("failed");
-            plan.setErrorMessage("候选物料不足 2 种，人工经验基线无法生成对照方案。");
-            return plan;
+            failurePlan.setGenerated(false);
+            failurePlan.setStatus("failed");
+            failurePlan.setErrorMessage("候选物料不足 2 种，人工经验基线无法生成对照方案。");
+            return failurePlan;
         }
 
         // Step 1: 计算每个候选物料的经验综合分，按降序排序
@@ -59,41 +68,54 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
 
         List<ScoredCandidate> scored = new ArrayList<>();
         for (PlanCoalSnapshot s : candidates) {
-            BigDecimal score = computeExperienceScore(order, s, maxPrice);
+            BigDecimal score = computeMaterialScore(order, s, maxPrice);
             if (score != null) {
                 scored.add(new ScoredCandidate(s, score));
             }
         }
         if (scored.size() < 2) {
-            plan.setGenerated(false);
-            plan.setStatus("failed");
-            plan.setErrorMessage("候选物料缺少必要煤质或价格数据，人工经验基线无法计算综合分。");
-            return plan;
+            failurePlan.setGenerated(false);
+            failurePlan.setStatus("failed");
+            failurePlan.setErrorMessage("候选物料缺少必要煤质或价格数据，人工经验基线无法计算综合分。");
+            return failurePlan;
         }
         scored.sort(Comparator.comparing(ScoredCandidate::score).reversed());
 
-        // Step 2: 固定取前两名按 60/40 配比
-        ScoredCandidate primary = scored.get(0);
-        ScoredCandidate secondary = scored.get(1);
+        // Step 2: 同时生成 N=2 与 N=3（候选物料够时）两组候选
+        HumanExperiencePlan candidateN2 = buildCandidate(order, scored, 2, RATIOS_N2, maxPrice);
+        HumanExperiencePlan candidateN3 = scored.size() >= 3
+                ? buildCandidate(order, scored, 3, RATIOS_N3, maxPrice)
+                : null;
 
-        HumanExperiencePlan.HumanExperienceItem itemA = toItem(primary, RATIO_PRIMARY);
-        HumanExperiencePlan.HumanExperienceItem itemB = toItem(secondary, RATIO_SECONDARY);
-        plan.getItems().add(itemA);
-        plan.getItems().add(itemB);
+        // Step 4: 在两份候选间按"可行优先 + 方案级综合分更高"择优，仅输出一份
+        HumanExperiencePlan winner = selectBetter(candidateN2, candidateN3);
+        winner.setSummary(buildSummary(winner, candidateN2, candidateN3));
+        winner.setAlternativeSummary(buildAlternativeSummary(winner, candidateN2, candidateN3));
+        return winner;
+    }
 
-        // Step 3: 线性加权计算配合煤指标 + 硬约束粗校验
-        plan.setPredictedAsh(weighted(primary, secondary, RATIO_PRIMARY, RATIO_SECONDARY,
-                q -> q.getAshContent()));
-        plan.setPredictedSulfur(weighted(primary, secondary, RATIO_PRIMARY, RATIO_SECONDARY,
-                q -> q.getSulfurContent()));
-        plan.setPredictedMoisture(weighted(primary, secondary, RATIO_PRIMARY, RATIO_SECONDARY,
-                q -> q.getMoistureContent()));
-        plan.setPredictedVolatile(weighted(primary, secondary, RATIO_PRIMARY, RATIO_SECONDARY,
-                q -> q.getVolatileContent()));
-        plan.setPredictedCalorific(weighted(primary, secondary, RATIO_PRIMARY, RATIO_SECONDARY,
-                q -> q.getCalorificValue()));
+    /** 构造给定 N 与配比的单份候选方案，并完成 Step 3 硬约束粗校验与方案级综合分计算。 */
+    private HumanExperiencePlan buildCandidate(Orders order,
+                                               List<ScoredCandidate> sortedScored,
+                                               int n,
+                                               List<BigDecimal> ratios,
+                                               BigDecimal maxPrice) {
+        HumanExperiencePlan plan = new HumanExperiencePlan();
+        plan.setDemandQuantity(order.getDemandQuantity());
+        plan.setSelectedN(n);
 
-        BigDecimal pricePerTon = weightedPrice(primary, secondary, RATIO_PRIMARY, RATIO_SECONDARY);
+        List<ScoredCandidate> picks = sortedScored.subList(0, n);
+        for (int i = 0; i < n; i++) {
+            plan.getItems().add(toItem(picks.get(i), ratios.get(i)));
+        }
+
+        plan.setPredictedAsh(weighted(picks, ratios, q -> q.getAshContent()));
+        plan.setPredictedSulfur(weighted(picks, ratios, q -> q.getSulfurContent()));
+        plan.setPredictedMoisture(weighted(picks, ratios, q -> q.getMoistureContent()));
+        plan.setPredictedVolatile(weighted(picks, ratios, q -> q.getVolatileContent()));
+        plan.setPredictedCalorific(weighted(picks, ratios, q -> q.getCalorificValue()));
+
+        BigDecimal pricePerTon = weightedPrice(picks, ratios);
         plan.setCostPerTon(pricePerTon);
         if (pricePerTon != null && order.getDemandQuantity() != null) {
             plan.setTotalCost(pricePerTon.multiply(order.getDemandQuantity())
@@ -110,13 +132,31 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
             plan.getViolations().addAll(violations);
         }
 
+        plan.setPlanScore(computePlanScore(plan, order, maxPrice));
         plan.setGenerated(true);
-        plan.setSummary(buildSummary(plan, primary, secondary));
         return plan;
     }
 
-    /** Step 1：经验综合分。质量项越优分越高，价格越低分越高。 */
-    private BigDecimal computeExperienceScore(Orders order, PlanCoalSnapshot snapshot, BigDecimal maxPrice) {
+    /** 在 N=2 / N=3 两份候选间择优：可行优先；同档比方案级综合分；再同档比成本更低；再同档取 N=3。 */
+    private HumanExperiencePlan selectBetter(HumanExperiencePlan a, HumanExperiencePlan b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        if (a.isHardConstraintsPassed() && !b.isHardConstraintsPassed()) return a;
+        if (!a.isHardConstraintsPassed() && b.isHardConstraintsPassed()) return b;
+
+        int scoreCompare = nullSafeCompare(a.getPlanScore(), b.getPlanScore());
+        if (scoreCompare > 0) return a;
+        if (scoreCompare < 0) return b;
+
+        int costCompare = nullSafeCompare(b.getCostPerTon(), a.getCostPerTon());
+        if (costCompare > 0) return a;
+        if (costCompare < 0) return b;
+
+        return b;
+    }
+
+    /** 候选物料级综合分（Step 1 公式）。 */
+    private BigDecimal computeMaterialScore(Orders order, PlanCoalSnapshot snapshot, BigDecimal maxPrice) {
         if (snapshot == null || snapshot.getQuality() == null || snapshot.getType() == null) {
             return null;
         }
@@ -131,10 +171,26 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         BigDecimal sulfurScore = positiveDeviationScore(q.getSulfurContent(), order.getTargetSulfur(), false);
         BigDecimal priceScore = priceScore(t.getPurchasePrice(), maxPrice);
 
+        return weightedSum(calorificScore, ashScore, sulfurScore, priceScore);
+    }
+
+    /**
+     * 方案级综合分：与候选物料级综合分使用相同权重，但代入加权后的方案指标。
+     * 用于在 N=2 / N=3 两份候选之间择优。
+     */
+    private BigDecimal computePlanScore(HumanExperiencePlan plan, Orders order, BigDecimal maxPrice) {
+        BigDecimal calorificScore = positiveDeviationScore(plan.getPredictedCalorific(), order.getTargetCalorific(), true);
+        BigDecimal ashScore = positiveDeviationScore(plan.getPredictedAsh(), order.getTargetAsh(), false);
+        BigDecimal sulfurScore = positiveDeviationScore(plan.getPredictedSulfur(), order.getTargetSulfur(), false);
+        BigDecimal priceScore = priceScore(plan.getCostPerTon(), maxPrice);
+        return weightedSum(calorificScore, ashScore, sulfurScore, priceScore);
+    }
+
+    private BigDecimal weightedSum(BigDecimal calorificScore, BigDecimal ashScore,
+                                   BigDecimal sulfurScore, BigDecimal priceScore) {
         if (calorificScore == null || ashScore == null || sulfurScore == null || priceScore == null) {
             return null;
         }
-
         return calorificScore.multiply(W_CALORIFIC)
                 .add(ashScore.multiply(W_ASH))
                 .add(sulfurScore.multiply(W_SULFUR))
@@ -184,25 +240,28 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         return item;
     }
 
-    private BigDecimal weighted(ScoredCandidate a, ScoredCandidate b,
-                                BigDecimal ra, BigDecimal rb,
-                                java.util.function.Function<CoalQuality, BigDecimal> getter) {
-        BigDecimal va = a.snapshot().getQuality() == null ? null : getter.apply(a.snapshot().getQuality());
-        BigDecimal vb = b.snapshot().getQuality() == null ? null : getter.apply(b.snapshot().getQuality());
-        if (va == null || vb == null) {
-            return null;
+    /** 通用：对若干候选按对应配比线性加权求煤质指标。任一空值都回退为 null。 */
+    private BigDecimal weighted(List<ScoredCandidate> picks, List<BigDecimal> ratios,
+                                Function<CoalQuality, BigDecimal> getter) {
+        BigDecimal sum = BigDecimal.ZERO;
+        for (int i = 0; i < picks.size(); i++) {
+            CoalQuality quality = picks.get(i).snapshot().getQuality();
+            if (quality == null) return null;
+            BigDecimal value = getter.apply(quality);
+            if (value == null) return null;
+            sum = sum.add(value.multiply(ratios.get(i)));
         }
-        return va.multiply(ra).add(vb.multiply(rb)).setScale(SCALE_QUALITY, RoundingMode.HALF_UP);
+        return sum.setScale(SCALE_QUALITY, RoundingMode.HALF_UP);
     }
 
-    private BigDecimal weightedPrice(ScoredCandidate a, ScoredCandidate b,
-                                     BigDecimal ra, BigDecimal rb) {
-        BigDecimal pa = a.snapshot().getType() == null ? null : a.snapshot().getType().getPurchasePrice();
-        BigDecimal pb = b.snapshot().getType() == null ? null : b.snapshot().getType().getPurchasePrice();
-        if (pa == null || pb == null) {
-            return null;
+    private BigDecimal weightedPrice(List<ScoredCandidate> picks, List<BigDecimal> ratios) {
+        BigDecimal sum = BigDecimal.ZERO;
+        for (int i = 0; i < picks.size(); i++) {
+            CoalType type = picks.get(i).snapshot().getType();
+            if (type == null || type.getPurchasePrice() == null) return null;
+            sum = sum.add(type.getPurchasePrice().multiply(ratios.get(i)));
         }
-        return pa.multiply(ra).add(pb.multiply(rb)).setScale(SCALE_COST, RoundingMode.HALF_UP);
+        return sum.setScale(SCALE_COST, RoundingMode.HALF_UP);
     }
 
     /** Step 3：硬约束粗校验。仅检查灰/硫/水（≤ 上限）和热值（≥ 下限）。 */
@@ -231,19 +290,52 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         }
     }
 
-    private String buildSummary(HumanExperiencePlan plan, ScoredCandidate primary, ScoredCandidate secondary) {
-        String primaryName = primary.snapshot().getType() == null ? "" : primary.snapshot().getType().getCoalName();
-        String secondaryName = secondary.snapshot().getType() == null ? "" : secondary.snapshot().getType().getCoalName();
+    private String buildSummary(HumanExperiencePlan winner,
+                                HumanExperiencePlan candidateN2,
+                                HumanExperiencePlan candidateN3) {
         StringBuilder sb = new StringBuilder();
         sb.append("人工经验基线（V1）：");
-        sb.append("Step1 按 0.4×热值+0.2×灰+0.2×硫+0.2×价 计算综合分；");
-        sb.append("Step2 取前两名 ").append(primaryName).append("（综合分 ").append(primary.score().toPlainString()).append("）")
-                .append("、").append(secondaryName).append("（综合分 ").append(secondary.score().toPlainString()).append("），")
-                .append("按 60% / 40% 配比；");
+        sb.append("Step1 按 0.4×热值+0.2×灰+0.2×硫+0.2×价 计算物料综合分；");
+        if (candidateN3 != null) {
+            sb.append("Step2 同时生成 N=2（60/40）与 N=3（50/30/20）两组候选；");
+        } else {
+            sb.append("Step2 候选物料不足 3 种，仅生成 N=2（60/40）一组候选；");
+        }
         sb.append("Step3 硬约束粗校验：")
-                .append(plan.isHardConstraintsPassed() ? "通过。" : "超限（" + String.join("；", plan.getViolations()) + "）。");
+                .append(winner.isHardConstraintsPassed()
+                        ? "最终方案通过。"
+                        : "最终方案超限（" + String.join("；", winner.getViolations()) + "）。");
+        sb.append("Step4 按可行优先 + 方案级综合分择优，最终采用 N=").append(winner.getSelectedN())
+                .append("（方案综合分 ").append(formatScore(winner.getPlanScore())).append("）。");
         sb.append("不查规则/案例/RAG，不做 Pareto 多目标，仅作对照展示，不参与系统最终推荐。");
         return sb.toString();
+    }
+
+    private String buildAlternativeSummary(HumanExperiencePlan winner,
+                                           HumanExperiencePlan candidateN2,
+                                           HumanExperiencePlan candidateN3) {
+        HumanExperiencePlan loser;
+        if (candidateN3 == null) {
+            return "候选物料不足 3 种，未生成 N=3 备选。";
+        }
+        loser = (winner == candidateN2) ? candidateN3 : candidateN2;
+        StringBuilder sb = new StringBuilder();
+        sb.append("被弃选备选：N=").append(loser.getSelectedN())
+                .append("，方案综合分 ").append(formatScore(loser.getPlanScore()))
+                .append("，吨煤成本 ").append(loser.getCostPerTon() == null ? "-" : loser.getCostPerTon().toPlainString()).append(" 元/t，")
+                .append(loser.isHardConstraintsPassed() ? "硬约束通过。" : "硬约束超限。");
+        return sb.toString();
+    }
+
+    private String formatScore(BigDecimal score) {
+        return score == null ? "-" : score.toPlainString();
+    }
+
+    private int nullSafeCompare(BigDecimal a, BigDecimal b) {
+        if (a == null && b == null) return 0;
+        if (a == null) return -1;
+        if (b == null) return 1;
+        return a.compareTo(b);
     }
 
     /** 局部数据载体：候选物料 + 经验综合分。 */
