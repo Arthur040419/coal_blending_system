@@ -3,6 +3,7 @@ package com.coalblend.service.intelligent.impl;
 import com.coalblend.entity.CoalQuality;
 import com.coalblend.entity.CoalType;
 import com.coalblend.entity.Orders;
+import com.coalblend.enums.PlanDecisionStatus;
 import com.coalblend.enums.ScoreStrategyType;
 import com.coalblend.service.intelligent.HumanExperienceBaselineService;
 import com.coalblend.service.intelligent.ParetoRankService;
@@ -31,8 +32,8 @@ import java.util.stream.Collectors;
 /**
  * 人工经验配煤基线服务实现（V1）。法则定义见 {@link HumanExperienceBaselineService}。
  * <p>
- * 为提高基线对真实经验决策的逼真度，V1 同时生成 N=2（60%/40%）与 N=3（50%/30%/20%）
- * 两组候选方案，按"硬约束可行优先 + 方案级综合分更高"原则择优，最终仅输出一个方案。
+ * V1 按固定人工经验配比模板生成 N=2（60%/40%）与 N=3（50%/30%/20%）候选方案，
+ * 复用系统决策校验后按"可执行优先 + 综合评分更高 + 吨煤成本更低"原则择优，最终仅输出一个方案。
  */
 @Slf4j
 @Service
@@ -98,43 +99,69 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         }
         scored.sort(Comparator.comparing(ScoredCandidate::score).reversed());
 
-        // Step 2: 同时生成 N=2 与 N=3（候选物料够时）两组候选
-        BaselineCandidate candidateN2 = buildCandidate(order, scored, 2, RATIOS_N2, maxPrice, runtimeConfig);
-        BaselineCandidate candidateN3 = scored.size() >= 3
-                ? buildCandidate(order, scored, 3, RATIOS_N3, maxPrice, runtimeConfig)
-                : null;
-
-        List<EvaluatedPlanDraft> comparableDrafts = new ArrayList<>();
-        if (candidateN2 != null && candidateN2.draft() != null) {
-            comparableDrafts.add(candidateN2.draft());
-        }
-        if (candidateN3 != null && candidateN3.draft() != null) {
-            comparableDrafts.add(candidateN3.draft());
-        }
+        // Step 2: 按人工经验配比生成多组 N=2 / N=3 候选，再优先选择统一决策口径下可执行的方案
+        List<BaselineCandidate> baselineCandidates = buildBaselineCandidates(order, scored, maxPrice, runtimeConfig);
+        List<EvaluatedPlanDraft> comparableDrafts = baselineCandidates.stream()
+                .map(BaselineCandidate::draft)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
         planDecisionService.decide(order, comparableDrafts, runtimeConfig);
         paretoRankService.rank(order, comparableDrafts);
-        syncComparableMetrics(candidateN2);
-        syncComparableMetrics(candidateN3);
+        baselineCandidates.forEach(this::syncComparableMetrics);
 
-        // Step 4: 在两份候选间按"可行优先 + 方案级综合分更高"择优，仅输出一份
-        HumanExperiencePlan winner = selectBetter(candidateN2.plan(), candidateN3 == null ? null : candidateN3.plan());
-        winner.setSummary(buildSummary(winner, candidateN2.plan(), candidateN3 == null ? null : candidateN3.plan()));
-        winner.setAlternativeSummary(buildAlternativeSummary(winner, candidateN2.plan(), candidateN3 == null ? null : candidateN3.plan()));
+        // Step 4: 可执行优先；同状态下按 Pareto、综合评分和成本择优，仅输出一份
+        BaselineCandidate winnerCandidate = baselineCandidates.stream()
+                .min(this::compareBaselineCandidates)
+                .orElse(null);
+        if (winnerCandidate == null) {
+            failurePlan.setGenerated(false);
+            failurePlan.setStatus("failed");
+            failurePlan.setErrorMessage("人工经验候选生成失败。");
+            return failurePlan;
+        }
+        HumanExperiencePlan winner = winnerCandidate.plan();
+        winner.setSummary(buildSummary(winner, baselineCandidates));
+        winner.setAlternativeSummary(buildAlternativeSummary(winner, baselineCandidates));
         return winner;
+    }
+
+    private List<BaselineCandidate> buildBaselineCandidates(Orders order,
+                                                            List<ScoredCandidate> sortedScored,
+                                                            BigDecimal maxPrice,
+                                                            BlendGenerationRuntimeConfig runtimeConfig) {
+        List<BaselineCandidate> candidates = new ArrayList<>();
+        int size = sortedScored.size();
+        for (int i = 0; i < size - 1; i++) {
+            for (int j = i + 1; j < size; j++) {
+                candidates.add(buildCandidate(order, List.of(sortedScored.get(i), sortedScored.get(j)),
+                        2, RATIOS_N2, maxPrice, runtimeConfig));
+            }
+        }
+        if (size >= 3) {
+            for (int i = 0; i < size - 2; i++) {
+                for (int j = i + 1; j < size - 1; j++) {
+                    for (int k = j + 1; k < size; k++) {
+                        candidates.add(buildCandidate(order,
+                                List.of(sortedScored.get(i), sortedScored.get(j), sortedScored.get(k)),
+                                3, RATIOS_N3, maxPrice, runtimeConfig));
+                    }
+                }
+            }
+        }
+        return candidates;
     }
 
     /** 构造给定 N 与配比的单份候选方案，并完成 Step 3 硬约束粗校验与方案级综合分计算。 */
     private BaselineCandidate buildCandidate(Orders order,
-                                               List<ScoredCandidate> sortedScored,
-                                               int n,
-                                               List<BigDecimal> ratios,
-                                               BigDecimal maxPrice,
-                                               BlendGenerationRuntimeConfig runtimeConfig) {
+                                             List<ScoredCandidate> picks,
+                                             int n,
+                                             List<BigDecimal> ratios,
+                                             BigDecimal maxPrice,
+                                             BlendGenerationRuntimeConfig runtimeConfig) {
         HumanExperiencePlan plan = new HumanExperiencePlan();
         plan.setDemandQuantity(order.getDemandQuantity());
         plan.setSelectedN(n);
 
-        List<ScoredCandidate> picks = sortedScored.subList(0, n);
         for (int i = 0; i < n; i++) {
             plan.getItems().add(toItem(picks.get(i), ratios.get(i)));
         }
@@ -172,6 +199,52 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
                 resolveScoreStrategy(runtimeConfig), runtimeConfig);
         draft.setCandidateSource("human");
         return new BaselineCandidate(plan, draft);
+    }
+
+    private int compareBaselineCandidates(BaselineCandidate left, BaselineCandidate right) {
+        HumanExperiencePlan a = left == null ? null : left.plan();
+        HumanExperiencePlan b = right == null ? null : right.plan();
+        if (a == null && b == null) return 0;
+        if (a == null) return 1;
+        if (b == null) return -1;
+
+        int statusCompare = Integer.compare(decisionPriority(a), decisionPriority(b));
+        if (statusCompare != 0) return statusCompare;
+
+        int paretoCompare = Integer.compare(nullAsLarge(a.getParetoRank()), nullAsLarge(b.getParetoRank()));
+        if (paretoCompare != 0) return paretoCompare;
+
+        int overallCompare = nullSafeCompare(b.getOverallScore(), a.getOverallScore());
+        if (overallCompare != 0) return overallCompare;
+
+        int planScoreCompare = nullSafeCompare(b.getPlanScore(), a.getPlanScore());
+        if (planScoreCompare != 0) return planScoreCompare;
+
+        int costCompare = nullSafeCompare(b.getCostPerTon(), a.getCostPerTon());
+        if (costCompare > 0) return -1;
+        if (costCompare < 0) return 1;
+
+        return Integer.compare(nullAsLarge(a.getSelectedN()), nullAsLarge(b.getSelectedN()));
+    }
+
+    private int decisionPriority(HumanExperiencePlan plan) {
+        String status = plan == null ? null : plan.getDecisionStatus();
+        if (PlanDecisionStatus.FEASIBLE.name().equals(status)) {
+            return PlanDecisionStatus.FEASIBLE.getPriority();
+        }
+        if (PlanDecisionStatus.RISKY.name().equals(status)) {
+            return PlanDecisionStatus.RISKY.getPriority();
+        }
+        if (PlanDecisionStatus.INFEASIBLE.name().equals(status)) {
+            return PlanDecisionStatus.INFEASIBLE.getPriority();
+        }
+        return plan != null && plan.isHardConstraintsPassed()
+                ? PlanDecisionStatus.RISKY.getPriority()
+                : PlanDecisionStatus.INFEASIBLE.getPriority();
+    }
+
+    private int nullAsLarge(Integer value) {
+        return value == null ? Integer.MAX_VALUE : value;
     }
 
     private ScoreStrategyType resolveScoreStrategy(BlendGenerationRuntimeConfig runtimeConfig) {
@@ -214,24 +287,6 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
                 .distinct()
                 .collect(Collectors.joining("；"));
         return StringUtils.hasText(text) ? text : "—";
-    }
-
-    /** 在 N=2 / N=3 两份候选间择优：可行优先；同档比方案级综合分；再同档比成本更低；再同档取 N=3。 */
-    private HumanExperiencePlan selectBetter(HumanExperiencePlan a, HumanExperiencePlan b) {
-        if (a == null) return b;
-        if (b == null) return a;
-        if (a.isHardConstraintsPassed() && !b.isHardConstraintsPassed()) return a;
-        if (!a.isHardConstraintsPassed() && b.isHardConstraintsPassed()) return b;
-
-        int scoreCompare = nullSafeCompare(a.getPlanScore(), b.getPlanScore());
-        if (scoreCompare > 0) return a;
-        if (scoreCompare < 0) return b;
-
-        int costCompare = nullSafeCompare(b.getCostPerTon(), a.getCostPerTon());
-        if (costCompare > 0) return a;
-        if (costCompare < 0) return b;
-
-        return b;
     }
 
     /** 候选物料级综合分（Step 1 公式）。 */
@@ -369,38 +424,42 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         }
     }
 
-    private String buildSummary(HumanExperiencePlan winner,
-                                HumanExperiencePlan candidateN2,
-                                HumanExperiencePlan candidateN3) {
+    private String buildSummary(HumanExperiencePlan winner, List<BaselineCandidate> candidates) {
         StringBuilder sb = new StringBuilder();
         sb.append("人工经验基线（V1）：");
         sb.append("Step1 按 0.4×热值+0.2×灰+0.2×硫+0.2×价 计算物料综合分；");
-        if (candidateN3 != null) {
-            sb.append("Step2 同时生成 N=2（60/40）与 N=3（50/30/20）两组候选；");
-        } else {
-            sb.append("Step2 候选物料不足 3 种，仅生成 N=2（60/40）一组候选；");
-        }
+        sb.append("Step2 生成 N=2（60/40）与 N=3（50/30/20）人工经验候选共 ")
+                .append(candidates == null ? 0 : candidates.size()).append(" 组；");
         sb.append("Step3 硬约束粗校验：")
                 .append(winner.isHardConstraintsPassed()
                         ? "最终方案通过。"
                         : "最终方案超限（" + String.join("；", winner.getViolations()) + "）。");
-        sb.append("Step4 按可行优先 + 方案级综合分择优，最终采用 N=").append(winner.getSelectedN())
-                .append("（方案综合分 ").append(formatScore(winner.getPlanScore())).append("）。");
-        sb.append("不查规则/案例/RAG，不做 Pareto 多目标，仅作对照展示，不参与系统最终推荐。");
+        sb.append("Step4 按可执行优先 + Pareto等级 + 系统综合评分 + 吨煤成本择优，最终采用 N=")
+                .append(winner.getSelectedN())
+                .append("（决策状态 ").append(StringUtils.hasText(winner.getDecisionStatusLabel())
+                        ? winner.getDecisionStatusLabel() : "-")
+                .append("，综合评分 ").append(formatScore(winner.getOverallScore())).append("）。");
+        sb.append("不查规则/案例/RAG，仅作对照展示，不参与系统最终推荐。");
         return sb.toString();
     }
 
-    private String buildAlternativeSummary(HumanExperiencePlan winner,
-                                           HumanExperiencePlan candidateN2,
-                                           HumanExperiencePlan candidateN3) {
-        HumanExperiencePlan loser;
-        if (candidateN3 == null) {
-            return "候选物料不足 3 种，未生成 N=3 备选。";
+    private String buildAlternativeSummary(HumanExperiencePlan winner, List<BaselineCandidate> candidates) {
+        if (candidates == null || candidates.size() <= 1) {
+            return "未生成其他人工经验备选。";
         }
-        loser = (winner == candidateN2) ? candidateN3 : candidateN2;
+        HumanExperiencePlan loser = candidates.stream()
+                .map(BaselineCandidate::plan)
+                .filter(plan -> plan != winner)
+                .min((a, b) -> compareBaselineCandidates(new BaselineCandidate(a, null), new BaselineCandidate(b, null)))
+                .orElse(null);
+        if (loser == null) {
+            return "未生成其他人工经验备选。";
+        }
         StringBuilder sb = new StringBuilder();
         sb.append("被弃选备选：N=").append(loser.getSelectedN())
-                .append("，方案综合分 ").append(formatScore(loser.getPlanScore()))
+                .append("，决策状态 ").append(StringUtils.hasText(loser.getDecisionStatusLabel())
+                        ? loser.getDecisionStatusLabel() : "-")
+                .append("，综合评分 ").append(formatScore(loser.getOverallScore()))
                 .append("，吨煤成本 ").append(loser.getCostPerTon() == null ? "-" : loser.getCostPerTon().toPlainString()).append(" 元/t，")
                 .append(loser.isHardConstraintsPassed() ? "硬约束通过。" : "硬约束超限。");
         return sb.toString();
