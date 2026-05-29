@@ -1,6 +1,7 @@
 package com.coalblend.service.intelligent;
 
 import com.coalblend.entity.Orders;
+import com.coalblend.service.intelligent.model.BlendGenerationRuntimeConfig;
 import com.coalblend.service.intelligent.model.HumanExperiencePlan;
 import com.coalblend.service.intelligent.model.PlanCoalSnapshot;
 
@@ -44,5 +45,6 @@ public interface HumanExperienceBaselineService {
      * @param candidates 已经过候选筛选的物料快照列表（与 AI 通道、系统枚举通道使用同一份）
      * @return 人工经验对照方案；若候选物料不足，返回 generated=false 的失败结果
      */
-    HumanExperiencePlan generate(Orders order, List<PlanCoalSnapshot> candidates);
+    HumanExperiencePlan generate(Orders order, List<PlanCoalSnapshot> candidates,
+                                 BlendGenerationRuntimeConfig runtimeConfig);
 }

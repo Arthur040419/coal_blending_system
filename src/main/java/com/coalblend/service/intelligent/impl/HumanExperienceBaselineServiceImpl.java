@@ -3,11 +3,20 @@ package com.coalblend.service.intelligent.impl;
 import com.coalblend.entity.CoalQuality;
 import com.coalblend.entity.CoalType;
 import com.coalblend.entity.Orders;
+import com.coalblend.enums.ScoreStrategyType;
 import com.coalblend.service.intelligent.HumanExperienceBaselineService;
+import com.coalblend.service.intelligent.ParetoRankService;
+import com.coalblend.service.intelligent.PlanDecisionService;
+import com.coalblend.service.intelligent.PlanScoreService;
+import com.coalblend.service.intelligent.model.BlendGenerationRuntimeConfig;
+import com.coalblend.service.intelligent.model.EvaluatedPlanDraft;
 import com.coalblend.service.intelligent.model.HumanExperiencePlan;
 import com.coalblend.service.intelligent.model.PlanCoalSnapshot;
+import com.coalblend.service.intelligent.model.ScoreDetail;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -15,7 +24,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 人工经验配煤基线服务实现（V1）。法则定义见 {@link HumanExperienceBaselineService}。
@@ -25,7 +36,12 @@ import java.util.function.Function;
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaselineService {
+
+    private final PlanScoreService planScoreService;
+    private final PlanDecisionService planDecisionService;
+    private final ParetoRankService paretoRankService;
 
     /** Step 1 综合分权重：质量优先（热值 0.4 + 灰 0.2 + 硫 0.2），价格次要（0.2） */
     private static final BigDecimal W_CALORIFIC = new BigDecimal("0.40");
@@ -48,7 +64,8 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
     private static final int SCALE_SCORE = 4;
 
     @Override
-    public HumanExperiencePlan generate(Orders order, List<PlanCoalSnapshot> candidates) {
+    public HumanExperiencePlan generate(Orders order, List<PlanCoalSnapshot> candidates,
+                                        BlendGenerationRuntimeConfig runtimeConfig) {
         HumanExperiencePlan failurePlan = new HumanExperiencePlan();
         failurePlan.setDemandQuantity(order == null ? null : order.getDemandQuantity());
 
@@ -82,24 +99,37 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         scored.sort(Comparator.comparing(ScoredCandidate::score).reversed());
 
         // Step 2: 同时生成 N=2 与 N=3（候选物料够时）两组候选
-        HumanExperiencePlan candidateN2 = buildCandidate(order, scored, 2, RATIOS_N2, maxPrice);
-        HumanExperiencePlan candidateN3 = scored.size() >= 3
-                ? buildCandidate(order, scored, 3, RATIOS_N3, maxPrice)
+        BaselineCandidate candidateN2 = buildCandidate(order, scored, 2, RATIOS_N2, maxPrice, runtimeConfig);
+        BaselineCandidate candidateN3 = scored.size() >= 3
+                ? buildCandidate(order, scored, 3, RATIOS_N3, maxPrice, runtimeConfig)
                 : null;
 
+        List<EvaluatedPlanDraft> comparableDrafts = new ArrayList<>();
+        if (candidateN2 != null && candidateN2.draft() != null) {
+            comparableDrafts.add(candidateN2.draft());
+        }
+        if (candidateN3 != null && candidateN3.draft() != null) {
+            comparableDrafts.add(candidateN3.draft());
+        }
+        planDecisionService.decide(order, comparableDrafts, runtimeConfig);
+        paretoRankService.rank(order, comparableDrafts);
+        syncComparableMetrics(candidateN2);
+        syncComparableMetrics(candidateN3);
+
         // Step 4: 在两份候选间按"可行优先 + 方案级综合分更高"择优，仅输出一份
-        HumanExperiencePlan winner = selectBetter(candidateN2, candidateN3);
-        winner.setSummary(buildSummary(winner, candidateN2, candidateN3));
-        winner.setAlternativeSummary(buildAlternativeSummary(winner, candidateN2, candidateN3));
+        HumanExperiencePlan winner = selectBetter(candidateN2.plan(), candidateN3 == null ? null : candidateN3.plan());
+        winner.setSummary(buildSummary(winner, candidateN2.plan(), candidateN3 == null ? null : candidateN3.plan()));
+        winner.setAlternativeSummary(buildAlternativeSummary(winner, candidateN2.plan(), candidateN3 == null ? null : candidateN3.plan()));
         return winner;
     }
 
     /** 构造给定 N 与配比的单份候选方案，并完成 Step 3 硬约束粗校验与方案级综合分计算。 */
-    private HumanExperiencePlan buildCandidate(Orders order,
+    private BaselineCandidate buildCandidate(Orders order,
                                                List<ScoredCandidate> sortedScored,
                                                int n,
                                                List<BigDecimal> ratios,
-                                               BigDecimal maxPrice) {
+                                               BigDecimal maxPrice,
+                                               BlendGenerationRuntimeConfig runtimeConfig) {
         HumanExperiencePlan plan = new HumanExperiencePlan();
         plan.setDemandQuantity(order.getDemandQuantity());
         plan.setSelectedN(n);
@@ -134,7 +164,56 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
 
         plan.setPlanScore(computePlanScore(plan, order, maxPrice));
         plan.setGenerated(true);
-        return plan;
+
+        List<PlanCoalSnapshot> snapshots = picks.stream()
+                .map(ScoredCandidate::snapshot)
+                .collect(Collectors.toList());
+        EvaluatedPlanDraft draft = planScoreService.evaluate(order, snapshots, ratios,
+                resolveScoreStrategy(runtimeConfig), runtimeConfig);
+        draft.setCandidateSource("human");
+        return new BaselineCandidate(plan, draft);
+    }
+
+    private ScoreStrategyType resolveScoreStrategy(BlendGenerationRuntimeConfig runtimeConfig) {
+        return runtimeConfig == null || runtimeConfig.getScoreStrategy() == null
+                ? ScoreStrategyType.BALANCED
+                : runtimeConfig.getScoreStrategy();
+    }
+
+    private void syncComparableMetrics(BaselineCandidate candidate) {
+        if (candidate == null || candidate.plan() == null || candidate.draft() == null) {
+            return;
+        }
+        HumanExperiencePlan plan = candidate.plan();
+        EvaluatedPlanDraft draft = candidate.draft();
+        ScoreDetail score = draft.getScoreDetail();
+        if (score != null) {
+            plan.setQualityScore(score.getQualityScore());
+            plan.setCostScore(score.getCostScore());
+            plan.setStabilityScore(score.getStabilityScore());
+            plan.setOverallScore(score.getOverallScore());
+        }
+        plan.setDecisionStatus(draft.getDecisionStatus());
+        plan.setDecisionStatusLabel(draft.getDecisionStatusLabel());
+        plan.setParetoRank(draft.getParetoRank());
+        plan.setDominatedCount(draft.getDominatedCount());
+        plan.setDominatesCount(draft.getDominatesCount());
+        plan.setObjectiveCostPerTon(draft.getObjectiveCostPerTon());
+        plan.setObjectiveQualityDeviation(draft.getObjectiveQualityDeviation());
+        plan.setObjectiveExecutionRisk(draft.getObjectiveExecutionRisk());
+        plan.setMainProblem(mainProblemText(draft));
+    }
+
+    private String mainProblemText(EvaluatedPlanDraft draft) {
+        if (draft == null || draft.getProblemItems() == null || draft.getProblemItems().isEmpty()) {
+            return "—";
+        }
+        String text = draft.getProblemItems().stream()
+                .map(item -> StringUtils.hasText(item.getTypeLabel()) ? item.getTypeLabel() : item.getMessage())
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.joining("；"));
+        return StringUtils.hasText(text) ? text : "—";
     }
 
     /** 在 N=2 / N=3 两份候选间择优：可行优先；同档比方案级综合分；再同档比成本更低；再同档取 N=3。 */
@@ -340,5 +419,9 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
 
     /** 局部数据载体：候选物料 + 经验综合分。 */
     private record ScoredCandidate(PlanCoalSnapshot snapshot, BigDecimal score) {
+    }
+
+    /** 局部数据载体：人工经验方案 + 系统同口径评价草稿。 */
+    private record BaselineCandidate(HumanExperiencePlan plan, EvaluatedPlanDraft draft) {
     }
 }

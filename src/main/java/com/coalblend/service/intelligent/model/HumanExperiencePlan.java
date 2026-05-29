@@ -24,6 +24,32 @@ public class HumanExperiencePlan {
     private Integer selectedN;
     /** 方案级综合分（按 0.4×热值+0.2×灰+0.2×硫+0.2×价 对加权后的方案指标计算） */
     private BigDecimal planScore;
+    /** 与系统候选方案一致的质量评分 */
+    private BigDecimal qualityScore;
+    /** 与系统候选方案一致的成本评分 */
+    private BigDecimal costScore;
+    /** 与系统候选方案一致的稳定性评分 */
+    private BigDecimal stabilityScore;
+    /** 与系统候选方案一致的综合评分 */
+    private BigDecimal overallScore;
+    /** 与系统候选方案一致的 Pareto 等级 */
+    private Integer paretoRank;
+    /** 支配该方案的候选数量 */
+    private Integer dominatedCount;
+    /** 该方案支配的候选数量 */
+    private Integer dominatesCount;
+    /** 多目标坐标：吨煤成本，越低越好 */
+    private BigDecimal objectiveCostPerTon;
+    /** 多目标坐标：质量偏差，越低越好 */
+    private BigDecimal objectiveQualityDeviation;
+    /** 多目标坐标：执行风险，越低越好 */
+    private BigDecimal objectiveExecutionRisk;
+    /** FEASIBLE / RISKY / INFEASIBLE */
+    private String decisionStatus;
+    /** 决策状态中文标签 */
+    private String decisionStatusLabel;
+    /** 与系统候选方案一致的问题摘要 */
+    private String mainProblem;
     /** 被弃选备选方案的择优摘要（如"N=3 候选综合分 21.06，低于 N=2 候选 23.84"） */
     private String alternativeSummary;
 

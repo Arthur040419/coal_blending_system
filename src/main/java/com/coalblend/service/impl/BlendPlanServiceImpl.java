@@ -344,7 +344,7 @@ public class BlendPlanServiceImpl implements BlendPlanService {
 
         AiBlendCandidateResult aiCandidateResult = aiBlendCandidateService.generateCandidates(
                 order, shortlisted, matchedRules, matchedCases, ragRetrieveResult, candidateScope, dto.getModelConfigId());
-        HumanExperiencePlan humanBaselinePlan = humanExperienceBaselineService.generate(order, shortlisted);
+        HumanExperiencePlan humanBaselinePlan = humanExperienceBaselineService.generate(order, shortlisted, runtimeConfig);
         List<EvaluatedPlanDraft> aiDrafts = buildAiCandidateDrafts(order, shortlisted, aiCandidateResult, runtimeConfig);
         List<EvaluatedPlanDraft> systemDrafts = coalBlendProperties.isEnableSystemEnumeration()
                 ? buildCandidateDrafts(order, shortlisted, runtimeConfig)
