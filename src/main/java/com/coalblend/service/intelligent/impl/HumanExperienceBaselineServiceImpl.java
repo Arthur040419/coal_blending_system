@@ -63,6 +63,7 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
     private static final int SCALE_QUALITY = 4;
     private static final int SCALE_COST = 2;
     private static final int SCALE_SCORE = 4;
+    private static final int MAX_EXPERIENCE_POOL_SIZE = 4;
 
     @Override
     public HumanExperiencePlan generate(Orders order, List<PlanCoalSnapshot> candidates,
@@ -99,8 +100,9 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         }
         scored.sort(Comparator.comparing(ScoredCandidate::score).reversed());
 
-        // Step 2: 按人工经验配比生成多组 N=2 / N=3 候选，再优先选择统一决策口径下可执行的方案
-        List<BaselineCandidate> baselineCandidates = buildBaselineCandidates(order, scored, maxPrice, runtimeConfig);
+        // Step 2: 仅在经验排序前 4 个煤种内尝试固定人工配比，避免人工基线退化成全量搜索
+        List<ScoredCandidate> experiencePool = scored.subList(0, Math.min(MAX_EXPERIENCE_POOL_SIZE, scored.size()));
+        List<BaselineCandidate> baselineCandidates = buildBaselineCandidates(order, experiencePool, maxPrice, runtimeConfig);
         List<EvaluatedPlanDraft> comparableDrafts = baselineCandidates.stream()
                 .map(BaselineCandidate::draft)
                 .filter(Objects::nonNull)
@@ -120,7 +122,7 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
             return failurePlan;
         }
         HumanExperiencePlan winner = winnerCandidate.plan();
-        winner.setSummary(buildSummary(winner, baselineCandidates));
+        winner.setSummary(buildSummary(winner, baselineCandidates, experiencePool.size()));
         winner.setAlternativeSummary(buildAlternativeSummary(winner, baselineCandidates));
         return winner;
     }
@@ -424,11 +426,12 @@ public class HumanExperienceBaselineServiceImpl implements HumanExperienceBaseli
         }
     }
 
-    private String buildSummary(HumanExperiencePlan winner, List<BaselineCandidate> candidates) {
+    private String buildSummary(HumanExperiencePlan winner, List<BaselineCandidate> candidates, int poolSize) {
         StringBuilder sb = new StringBuilder();
         sb.append("人工经验基线（V1）：");
         sb.append("Step1 按 0.4×热值+0.2×灰+0.2×硫+0.2×价 计算物料综合分；");
-        sb.append("Step2 生成 N=2（60/40）与 N=3（50/30/20）人工经验候选共 ")
+        sb.append("Step2 仅在经验排序前 ").append(poolSize)
+                .append(" 个煤种内生成 N=2（60/40）与 N=3（50/30/20）人工经验候选共 ")
                 .append(candidates == null ? 0 : candidates.size()).append(" 组；");
         sb.append("Step3 硬约束粗校验：")
                 .append(winner.isHardConstraintsPassed()
