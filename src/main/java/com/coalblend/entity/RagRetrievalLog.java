@@ -23,5 +23,10 @@ public class RagRetrievalLog {
     private String modelName;
     private String promptText;
     private String modelOutput;
+    private String retrievalMode;
+    private String queryEmbeddingModel;
+    private String retrievedChunksJson;
+    private String rerankResultJson;
+    private String usedChunkIds;
     private LocalDateTime createTime;
 }

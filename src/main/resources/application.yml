@@ -55,3 +55,17 @@ coal:
     fallback-rule-basis: "当前为系统兜底说明：未调用大模型时无法自动生成与命中规则一一对应的依据条文，请在启用模型后重新生成方案。"
     fallback-risk-tip: "请关注库存余量与现场执行偏差，以上为系统兜底风险提示。"
     fallback-optimize-suggestion: "可在「模型配置」中填写兼容 OpenAI Chat Completions 的接口地址与密钥，并将状态设为启用后重新生成方案，以获得大模型生成的细化建议。"
+  rag:
+    vector-enabled: ${COAL_RAG_VECTOR_ENABLED:true}
+    qdrant-url: ${COAL_RAG_QDRANT_URL:http://127.0.0.1:6333}
+    qdrant-api-key: ${COAL_RAG_QDRANT_API_KEY:}
+    collection-name: ${COAL_RAG_COLLECTION:coal_rag_chunks}
+    vector-size: ${COAL_RAG_VECTOR_SIZE:1024}
+    embedding-api-url: ${COAL_RAG_EMBEDDING_API_URL:http://127.0.0.1:11434/api/embed}
+    embedding-model: ${COAL_RAG_EMBEDDING_MODEL:bge-m3}
+    fallback-hash-embedding: ${COAL_RAG_FALLBACK_HASH_EMBEDDING:true}
+    chunk-max-chars: ${COAL_RAG_CHUNK_MAX_CHARS:700}
+    chunk-overlap-chars: ${COAL_RAG_CHUNK_OVERLAP_CHARS:80}
+    vector-weight: ${COAL_RAG_VECTOR_WEIGHT:0.60}
+    keyword-weight: ${COAL_RAG_KEYWORD_WEIGHT:0.30}
+    business-weight: ${COAL_RAG_BUSINESS_WEIGHT:0.10}
