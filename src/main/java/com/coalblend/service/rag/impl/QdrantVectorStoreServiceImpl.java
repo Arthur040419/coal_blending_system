@@ -3,7 +3,6 @@ package com.coalblend.service.rag.impl;
 import com.coalblend.common.config.CoalRagProperties;
 import com.coalblend.service.rag.RagVectorStoreService;
 import com.coalblend.service.rag.model.VectorSearchHit;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpEntity;
@@ -22,12 +21,16 @@ import java.util.Map;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class QdrantVectorStoreServiceImpl implements RagVectorStoreService {
 
     private final CoalRagProperties props;
-    @Qualifier("ragRestTemplate")
     private final RestTemplate restTemplate;
+
+    public QdrantVectorStoreServiceImpl(CoalRagProperties props,
+                                        @Qualifier("ragRestTemplate") RestTemplate restTemplate) {
+        this.props = props;
+        this.restTemplate = restTemplate;
+    }
 
     @Override
     public boolean available() {
