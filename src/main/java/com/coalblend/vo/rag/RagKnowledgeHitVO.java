@@ -10,6 +10,8 @@ import java.util.List;
 public class RagKnowledgeHitVO {
 
     private Long id;
+    private Long chunkId;
+    private Long documentId;
     private String knowledgeCode;
     private String title;
     private String knowledgeType;
@@ -18,6 +20,10 @@ public class RagKnowledgeHitVO {
     private Long sourceId;
     private String tags;
     private double score;
+    private Double vectorScore;
+    private Double keywordScore;
+    private Double businessScore;
+    private String retrievalMode;
     private List<String> hitKeywords = new ArrayList<>();
     private String hitReason;
 

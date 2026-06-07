@@ -17,4 +17,13 @@ public class LlmClientConfiguration {
                 .setReadTimeout(props.getReadTimeout())
                 .build();
     }
+
+    @Bean
+    @Qualifier("ragRestTemplate")
+    public RestTemplate ragRestTemplate(RestTemplateBuilder builder, CoalRagProperties props) {
+        return builder
+                .setConnectTimeout(props.getConnectTimeout())
+                .setReadTimeout(props.getReadTimeout())
+                .build();
+    }
 }
